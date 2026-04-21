@@ -12,8 +12,11 @@ Both machines connect to the same Supabase project (`xvwvwbnxdsjpnealarkh`) via 
 
 ```
 skills/      # Claude skill definitions (one .md per skill, loaded by the Claude desktop at runtime)
+wrappers/    # Paste-ready Cowork scheduled-task prompts (one .md per scheduled task)
 reference/   # Docs the skills cite at runtime (spec sections, scoring rubric)
 ```
+
+See [`wrappers/README.md`](wrappers/README.md) for the scheduled-task registration pattern and `$CONAN_ROOT` conventions.
 
 ## What each skill does
 

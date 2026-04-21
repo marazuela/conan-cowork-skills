@@ -1,6 +1,6 @@
 ---
 name: signal_resolver
-description: Drain unscored signals from `thesis_jobs` where status='needs_scoring'. The always-manual rubrics are activist_governance / merger_arb / litigation, but the live reactor now enqueues any known scoring profile that lands unscored. For each job, research the filing, estimate the profile's dims honestly (with citations + reasoning), rescore via rubric_engine, and — if the resolved band is immediate — draft the v2 thesis inline and promote in the same pass. Mirrors thesis_writer: runs under Pedro's Cowork-scheduled account, not Anthropic API.
+description: Drain signals from `thesis_jobs` where status='needs_scoring'. The always-manual rubrics are activist_governance / merger_arb / litigation, but the live reactor now also enqueues provisional heuristic rows when `_provenance='heuristic'` and `extensions.scoring_meta.requires_resolution=true`. For each job, research the filing, estimate the profile's dims honestly (with citations + reasoning), rescore via rubric_engine, and — if the resolved band is immediate — draft the v2 thesis inline and promote in the same pass. Mirrors thesis_writer: runs under Pedro's Cowork-scheduled account, not Anthropic API.
 trigger: Recurring scheduled task (every 10 min) OR on-demand "drain signal_resolver queue"
 quota: Shares thesis_writer's 15/day thesis promotion cap. Dim resolution is unmetered; only thesis drafting consumes quota.
 ---
@@ -9,7 +9,7 @@ You are the signal-resolver for the Conan v2 investment research system. Scanner
 
 ## Invariants
 
-1. **Only unscored signals from known profiles.** `needs_scoring` rows are the reactor's queue for unscored signals. Historically that was just `activist_governance`, `merger_arb`, and `litigation`; in live v2 it can also include `short_positioning`, `binary_catalyst`, or `takeover_candidate` when required payload keys were missing at ingest. Never touch rows that are not `status='needs_scoring'`, and never change the scoring profile.
+1. **Only resolver-queued signals from known profiles.** `needs_scoring` rows are the reactor's queue for two cases: truly unscored signals (`score IS NULL`) and provisional heuristic rows (`dimensions._provenance='heuristic'` with `extensions.scoring_meta.requires_resolution=true`). Historically that was just `activist_governance`, `merger_arb`, and `litigation`; in live v2 it can also include `short_positioning`, `binary_catalyst`, or `takeover_candidate`. Never touch rows that are not `status='needs_scoring'`, and never change the scoring profile.
 2. **Dims must be evidence-backed.** Each dim 1–5 value requires a reasoning sentence with a citation (URL you visited). If you can't support a dim above the 3-default line on any dim after research, mark the job `scoring_complete_below_immediate` with `gate_reasons=['insufficient_evidence']` — do NOT force values to move the row.
 3. **rubric_engine is authoritative.** Never hand-calculate score/band. Always call `rescore_with_dims` — it computes weighted total, applies auto-caps, returns score/band/auto_caps.
 4. **Quota only bites on thesis drafting.** Resolving dims is unmetered. If the rescore lands at immediate and daily thesis quota is exhausted, transition the row to `scoring_complete_below_immediate` with a note; reactor will re-queue tomorrow when the signal is re-inspected.
@@ -40,7 +40,7 @@ ORDER BY created_at ASC
 LIMIT 3
 ```
 
-If no rows → emit `{processed: 0}` and stop. Otherwise, process one row at a time.
+If no rows → emit `{processed: 0}` and stop. Otherwise, process one row at a time. Operational note: `/alerts` in the dashboard surfaces these rows alongside `queued` / `drafting` thesis jobs so backlog age is visible to operators.
 
 ### 2. Claim the job
 
