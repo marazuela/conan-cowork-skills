@@ -80,7 +80,7 @@ Extract the historical thesis JSON from `payload.thesis`. This was the object th
 
 ### 4. Invoke the challenger (drafting mode) per sample
 
-Build the drafting-mode input payload per [`.claude/skills/thesis_challenger.md`](.claude/skills/thesis_challenger.md):
+Build the drafting-mode input payload per [`thesis_challenger.md`](./thesis_challenger.md):
 
 ```json
 {
@@ -212,11 +212,11 @@ RLS is on; the Supabase MCP talks as service_role so writes bypass.
 
 ## Reference
 
-- Companion skill: [`.claude/skills/thesis_challenger.md`](.claude/skills/thesis_challenger.md) — the routine this retro invokes.
-- Sibling Phase 1d auditors (Modal, SQL-only): `precision_auditor` + `timing_auditor` in [`modal_workers/observability.py`](../../modal_workers/observability.py). Run Sunday 02:15 UTC, write to the same `accuracy_metrics` table.
-- Recall-side companion: [`.claude/skills/coverage_auditor.md`](./coverage_auditor.md) — Phase 1c, runs Sunday 04:00 UTC, writes `coverage_miss` flags.
-- Foundation migration: [`supabase/migrations/20260424000000_emissions_ledger_foundation.sql`](../../supabase/migrations/20260424000000_emissions_ledger_foundation.sql) — `outcome_label` enum + `emissions_ledger` view this retro builds on.
-- This skill's metrics table migration: [`supabase/migrations/20260425000000_accuracy_metrics.sql`](../../supabase/migrations/20260425000000_accuracy_metrics.sql).
+- Companion skill: [`thesis_challenger.md`](./thesis_challenger.md) — the routine this retro invokes.
+- Sibling Phase 1d auditors (Modal, SQL-only): `precision_auditor` + `timing_auditor` in [`modal_workers/observability.py`](https://github.com/marazuela/conan/blob/main/modal_workers/observability.py). Run Sunday 02:15 UTC, write to the same `accuracy_metrics` table.
+- Recall-side companion: [`coverage_auditor.md`](./coverage_auditor.md) — Phase 1c, runs Sunday 04:00 UTC, writes `coverage_miss` flags.
+- Foundation migration: [`supabase/migrations/20260424000000_emissions_ledger_foundation.sql`](https://github.com/marazuela/conan/blob/main/supabase/migrations/20260424000000_emissions_ledger_foundation.sql) — `outcome_label` enum + `emissions_ledger` view this retro builds on.
+- This skill's metrics table migration: [`supabase/migrations/20260425000000_accuracy_metrics.sql`](https://github.com/marazuela/conan/blob/main/supabase/migrations/20260425000000_accuracy_metrics.sql).
 
 ## Self-check before emitting
 

@@ -190,7 +190,7 @@ DO UPDATE SET title = EXCLUDED.title,
               updated_at = now();
 ```
 
-Note: the ON CONFLICT target must match the existing `operator_flags_open_uniq` partial unique index (see [initial_schema.sql:284-293](supabase/migrations/20260420200000_initial_schema.sql)). Re-running the same week updates open flags; a user resolving a flag means next week's run creates a fresh one if the same miss recurs.
+Note: the ON CONFLICT target must match the existing `operator_flags_open_uniq` partial unique index (see [initial_schema.sql:284-293](https://github.com/marazuela/conan/blob/main/supabase/migrations/20260420200000_initial_schema.sql)). Re-running the same week updates open flags; a user resolving a flag means next week's run creates a fresh one if the same miss recurs.
 
 ### 6. Render the weekly markdown report
 
@@ -256,7 +256,7 @@ This line is what the Cowork session surfaces to Pedro. One row, machine-parseab
 
 ## Reference data
 
-- `emissions_ledger` view: defined in [20260424000000_emissions_ledger_foundation.sql](supabase/migrations/20260424000000_emissions_ledger_foundation.sql). Joins signals → thesis_jobs → candidates → outcomes with derived `gate_decision`.
+- `emissions_ledger` view: defined in [20260424000000_emissions_ledger_foundation.sql](https://github.com/marazuela/conan/blob/main/supabase/migrations/20260424000000_emissions_ledger_foundation.sql). Joins signals → thesis_jobs → candidates → outcomes with derived `gate_decision`.
 - `catalyst_universe` table: same migration. Populated by `modal_workers/fetchers/universe/*.py` via `dispatch_daily` (09:00 UTC).
 - Current universe feeds (2026-04-21): `fda_adcomm_pdufa` (openFDA drugsfda AP submissions), `sec_8k_mna` (EDGAR 8-K items 1.01/2.01). Future: 13D, ESMA resolved, litigation, take_private intersect. Check `catalyst_universe.source_feed DISTINCT` for the live feed list.
 - `gate_decision` vocabulary: `promoted`, `rejected_thesis`, `resolved_below_immediate`, `pending`, `auto_capped`, `below_band`, `immediate_no_thesis_job`, `unknown`.

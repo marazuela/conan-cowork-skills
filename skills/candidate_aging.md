@@ -81,7 +81,7 @@ For each candidate, in order, check these rules. First match wins:
 
 ### 4. Stage B — load recent signals for Claude evaluation
 
-**Pick the window up front from `candidate.scoring_profile`**, matching the reactor's rule in [rubric_engine.py:306](modal_workers/shared/rubric_engine.py) (`window_days`):
+**Pick the window up front from `candidate.scoring_profile`**, matching the reactor's rule in [rubric_engine.py:306](https://github.com/marazuela/conan/blob/main/modal_workers/shared/rubric_engine.py) (`window_days`):
 
 - `candidate.scoring_profile == 'litigation'` → 30-day window
 - anything else → 14-day window
@@ -182,7 +182,7 @@ For each update in `kill_condition_updates` with `new_status='triggered'`:
 3. Run the Python regex (case-insensitive unless the pattern already has flags):
 
 ```bash
-cd /Users/Pico/Documents/Claude/Projects/Conan
+cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
 python3 -c "
 import json, re, sys
 pattern = '''<observable.search_pattern>'''
@@ -214,7 +214,7 @@ If the result is `NO_MATCH`:
           $full_routine_output_jsonb,
           COALESCE($prev, 0) + 1);
   ```
-- If the NEW `consecutive_failures ≥ 3`, surface an `operator_flags` row (the partial unique index at [initial_schema.sql:284-293](supabase/migrations/20260420200000_initial_schema.sql) dedupes open flags per `(source, kind, candidate_id)`):
+- If the NEW `consecutive_failures ≥ 3`, surface an `operator_flags` row (the partial unique index at [initial_schema.sql:284-293](https://github.com/marazuela/conan/blob/main/supabase/migrations/20260420200000_initial_schema.sql) dedupes open flags per `(source, kind, candidate_id)`):
   ```sql
   INSERT INTO public.operator_flags (severity, source, kind, candidate_id, title, body, evidence)
   VALUES ('warn', 'candidate_aging', 'aging_stuck', $candidate_id,

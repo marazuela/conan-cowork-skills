@@ -180,7 +180,7 @@ In order — first applicable rule determines the verdict. If none fires, `confi
 
 ## Reference
 
-- Spec invariants: [spec.md §7.4](/Users/Pico/Documents/Claude/Projects/Conan/spec.md) (drafting) and [spec.md §7.5](/Users/Pico/Documents/Claude/Projects/Conan/spec.md) (aging).
-- Caller-side retry + dispatch tables: [.claude/skills/thesis_writer.md §8f](/Users/Pico/Documents/Claude/Projects/Conan/.claude/skills/thesis_writer.md) and [.claude/skills/candidate_aging.md §5.5](/Users/Pico/Documents/Claude/Projects/Conan/.claude/skills/candidate_aging.md).
+- Spec invariants: [spec.md §7.4](../reference/spec.md) (drafting) and [spec.md §7.5](../reference/spec.md) (aging).
+- Caller-side retry + dispatch tables: [thesis_writer.md §8f](./thesis_writer.md) and [candidate_aging.md §5.5](./candidate_aging.md).
 - Exemplar confirm-worthy thesis (drafting mode): `unified_system/unified_system/candidates/AXSM_ADA_PDUFA.md`.
 - Canonical kill-worthy thesis (drafting mode): `unified_system/unified_system/candidates/rejected_pending_thesis/ITRK_XLON_eqt-possible-offer.md`. Study it — your job includes catching this shape.

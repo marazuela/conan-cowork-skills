@@ -99,7 +99,7 @@ cat > /tmp/resolver_$JOB_ID.json <<'EOF'
 }
 EOF
 
-cd /Users/Pico/Documents/Claude/Projects/Conan
+cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
 python3 -c "
 import json
 from modal_workers.shared.rubric_engine import rescore_with_dims
@@ -170,11 +170,11 @@ Reuse the research from step 4 — do NOT re-search. Transition the job:
 UPDATE public.thesis_jobs SET status = 'drafting' WHERE id = $job_id;
 ```
 
-Draft the thesis JSON with the exact shape specified in [thesis_writer.md](.claude/skills/thesis_writer.md) step 6 (situation / why_underpriced / next_catalyst / next_catalyst_date / kill_conditions / steelman / web_research / structured_kill_conditions / confidence / insufficient_signal / primary_source_citations). Same tag discipline (≥5 reasoning tags, ≥1 `[verified]`). Same honest-decline rule.
+Draft the thesis JSON with the exact shape specified in [thesis_writer.md](./thesis_writer.md) step 6 (situation / why_underpriced / next_catalyst / next_catalyst_date / kill_conditions / steelman / web_research / structured_kill_conditions / confidence / insufficient_signal / primary_source_citations). Same tag discipline (≥5 reasoning tags, ≥1 `[verified]`). Same honest-decline rule.
 
 ### 11. Challenger, gate, promote or DLQ
 
-From this point the flow is identical to [thesis_writer.md](.claude/skills/thesis_writer.md) steps 6.5 through 8f — **including the step 6.8 challenger pass**. Invoke the challenger routine BEFORE the syntactic gate; route on verdict:
+From this point the flow is identical to [thesis_writer.md](./thesis_writer.md) steps 6.5 through 8f — **including the step 6.8 challenger pass**. Invoke the challenger routine BEFORE the syntactic gate; route on verdict:
 
 - **Challenger `confirm` + syntactic gate passed** → UPSERT `candidates`, insert `candidate_events` (event_type `'created'` on first insert, `'thesis_drafted_by_claude'` on convergence re-draft), set job status `'promoted'`, record `candidate_id`. Both the inline resolver's draft and the challenger's verdict share thesis_writer's retry counters: `attempt_count` (max 2 drafts) and `challenge_count` (max 2 challenges), both on the same `thesis_jobs` row.
 - **Challenger `challenge`** → amend once addressing `required_fixes`, re-run the challenger (`challenge_count` increment). Second `challenge` → DLQ with `final_reasons=['challenger_challenge_exhausted', …]`.
@@ -182,7 +182,7 @@ From this point the flow is identical to [thesis_writer.md](.claude/skills/thesi
 - **Syntactic gate fail (first)** → `status='gate_failed_retrying'`, amend once.
 - **Syntactic gate fail (second) OR `confidence='low'` OR `insufficient_signal=true`** → insert `thesis_drafting_failures`, set job `status='dlq'`.
 
-See the [thesis_writer.md](.claude/skills/thesis_writer.md) §8f dispatch table for the full verdict × gate matrix. The inline-draft path through the resolver exercises the same adversarial surface as thesis_writer itself — no special case. Worst-case compute per DLQ'd immediate-band signal is 4 Claude calls (2 drafts × 2 challenges); happy-path is 2 calls (draft + confirm), same as thesis_writer.
+See the [thesis_writer.md](./thesis_writer.md) §8f dispatch table for the full verdict × gate matrix. The inline-draft path through the resolver exercises the same adversarial surface as thesis_writer itself — no special case. Worst-case compute per DLQ'd immediate-band signal is 4 Claude calls (2 drafts × 2 challenges); happy-path is 2 calls (draft + confirm), same as thesis_writer.
 
 ### 12. Move to the next job
 

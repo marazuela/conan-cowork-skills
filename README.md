@@ -32,7 +32,7 @@ The live Conan working directory symlinks its `.claude/skills/` and the two top-
 
 ```bash
 # one-time, on the Mac:
-git clone git@github.com:<owner>/conan-cowork-skills.git /Users/Pico/Documents/Claude/Projects/conan-cowork-skills
+git clone git@github.com:marazuela/conan-cowork-skills.git /Users/Pico/Documents/Claude/Projects/conan-cowork-skills
 cd /Users/Pico/Documents/Claude/Projects/Conan
 
 # back up the original directory once
@@ -43,6 +43,9 @@ ln -s /Users/Pico/Documents/Claude/Projects/conan-cowork-skills/skills .claude/s
 ln -sf /Users/Pico/Documents/Claude/Projects/conan-cowork-skills/reference/spec.md spec.md
 ln -sf /Users/Pico/Documents/Claude/Projects/conan-cowork-skills/reference/CONAN_SCORING_METHOD.md CONAN_SCORING_METHOD.md
 
+# set CONAN_ROOT so `cd "$CONAN_ROOT"` in skills resolves
+echo 'export CONAN_ROOT=/Users/Pico/Documents/Claude/Projects/Conan' >> ~/.zshrc
+
 # verify Claude can still load the skills, then:
 rm -rf .claude/skills.bak
 ```
@@ -51,19 +54,30 @@ After this, editing a skill from either path (`Conan/.claude/skills/*.md` or `co
 
 ## Setup — second machine (task runner)
 
-```bash
-git clone https://github.com/<owner>/conan-cowork-skills.git ~/conan-cowork-skills
+The task-runner machine needs **both** this repo and `marazuela/conan` checked out, because three skills (`signal_resolver`, `candidate_aging`, `thesis_writer`) shell out to local Python in the Conan tree (`modal_workers.shared.rubric_engine.rescore_with_dims`, `modal_workers.shared.candidate_gate.assess_thesis_v2`).
 
-# symlink the skills into that machine's Claude skills directory.
-# (exact path depends on the Claude desktop install — typically ~/.claude/skills/ or %APPDATA%\Claude\skills\)
+```bash
+# 1. clone both repos
+git clone https://github.com/marazuela/conan-cowork-skills.git ~/conan-cowork-skills
+git clone https://github.com/marazuela/conan.git ~/conan
+
+# 2. symlink skills into the Claude skills directory
+#    path depends on install — typically ~/.claude/skills or %APPDATA%\Claude\skills
 ln -s ~/conan-cowork-skills/skills ~/.claude/skills
 
-# for scheduled tasks to reach the reference docs, either:
-#   (a) pass the reference/ path to the skill at invocation, or
-#   (b) symlink reference/ into whatever cwd the scheduled task runs in.
+# 3. set CONAN_ROOT persistently so `cd "$CONAN_ROOT"` in skills resolves
+#    (bash/zsh — add to ~/.bashrc, ~/.zshrc, or equivalent shell rc)
+echo 'export CONAN_ROOT=$HOME/conan' >> ~/.bashrc
+#    (Windows/PowerShell)
+#    setx CONAN_ROOT "C:\Users\<you>\conan"
 ```
 
-Supabase access on this machine is expected to already be configured (MCP + service-role key in local env).
+### Requirements on the task-runner machine
+
+- **Python 3** with `requests`, `httpx`, any deps referenced by `modal_workers/shared/*.py`. A minimal `pip install requests httpx` covers the hot path.
+- **Supabase MCP** configured with the `xvwvwbnxdsjpnealarkh` project and a local service-role key — skills call MCP for all DB reads/writes.
+- **`CONAN_ROOT` env var** pointing at the `marazuela/conan` checkout. Skills reference it as `cd "${CONAN_ROOT:?...}"` and will fail with a clear error if unset.
+- Fresh `git pull` in both `~/conan-cowork-skills` and `~/conan` before each scheduled-task window (a simple cron can handle this).
 
 ## Sync cadence
 

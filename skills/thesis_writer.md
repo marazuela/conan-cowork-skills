@@ -229,7 +229,7 @@ cat > /tmp/thesis_$JOB_ID.json <<'EOF'
 <paste the JSON from step 6>
 EOF
 
-cd /Users/Pico/Documents/Claude/Projects/Conan
+cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
 python3 -c "
 import json, sys
 from modal_workers.shared.candidate_gate import assess_thesis_v2
