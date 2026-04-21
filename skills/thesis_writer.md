@@ -222,22 +222,22 @@ UPDATE public.thesis_jobs SET challenge_count = challenge_count + 1 WHERE id = $
 
 ### 7. Validate via the syntactic gate
 
-Write the draft to a temp file and call the gate:
+Pipe the draft to Python over stdin — do **not** stage through `/tmp`. The Cowork VM's `/tmp` is permission-denied on some runs; a past stuck-claim incident (signal_resolver, 2026-04-21 23:05 UTC) traced to `bash: /tmp/*.json: Permission denied` followed by an abandoned `status='scoring'` row that held the per-task concurrency slot and blocked every subsequent dispatch. The same failure mode applies to this gate call — if the temp file write fails, the job can strand in `status='drafting'` and lock the thesis_writer slot.
 
 ```bash
-cat > /tmp/thesis_$JOB_ID.json <<'EOF'
-<paste the JSON from step 6>
-EOF
-
 cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
-python3 -c "
+python3 -c '
 import json, sys
 from modal_workers.shared.candidate_gate import assess_thesis_v2
-thesis = json.load(open('/tmp/thesis_$JOB_ID.json'))
+thesis = json.load(sys.stdin)
 ok, reasons = assess_thesis_v2(thesis)
-print(json.dumps({'ok': ok, 'reasons': reasons}))
-"
+print(json.dumps({"ok": ok, "reasons": reasons}))
+' <<'JSON'
+<paste the JSON from step 6>
+JSON
 ```
+
+The `python3 -c '...'` script is single-quoted (no shell interpolation) and the heredoc delimiter is quoted `<<'JSON'` (no variable expansion in the thesis body) — the payload goes through bash untouched and Python reads it verbatim from stdin.
 
 ### 8a. Gate passed → promote
 

@@ -90,31 +90,33 @@ Use the **profile-specific rubric** below for what each dim's 1/3/5 value actual
 
 ### 6. Rescore via Python
 
+Pipe the payload to Python over stdin — do **not** stage through `/tmp`. The Cowork VM's `/tmp` is permission-denied on some runs; a past stuck-claim incident (2026-04-21 23:05 UTC) traced to `bash: /tmp/resolver_*.json: Permission denied` followed by an abandoned `status='scoring'` row that held the per-task concurrency slot and blocked every subsequent dispatch. Read JSON from stdin instead; no filesystem staging.
+
 ```bash
-cat > /tmp/resolver_$JOB_ID.json <<'EOF'
+cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
+python3 -c '
+import json, sys
+from modal_workers.shared.rubric_engine import rescore_with_dims
+blob = json.load(sys.stdin)
+out = rescore_with_dims(
+    blob["scoring_profile"], blob["raw_payload"], blob["dims"],
+    provenance="ai_resolved",
+)
+print(json.dumps({
+    "score": out["score"], "band": out["band"],
+    "dimensions_with_provenance": out["dimensions_with_provenance"],
+    "auto_caps_triggered": out["auto_caps_triggered"],
+}))
+' <<'JSON'
 {
   "scoring_profile": "<profile>",
   "raw_payload": <original signals.raw_payload>,
   "dims": <dimensions dict from step 5>
 }
-EOF
-
-cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
-python3 -c "
-import json
-from modal_workers.shared.rubric_engine import rescore_with_dims
-blob = json.load(open('/tmp/resolver_$JOB_ID.json'))
-out = rescore_with_dims(
-    blob['scoring_profile'], blob['raw_payload'], blob['dims'],
-    provenance='ai_resolved',
-)
-print(json.dumps({
-    'score': out['score'], 'band': out['band'],
-    'dimensions_with_provenance': out['dimensions_with_provenance'],
-    'auto_caps_triggered': out['auto_caps_triggered'],
-}))
-"
+JSON
 ```
+
+The `python3 -c '...'` script is single-quoted (no shell interpolation) and the heredoc delimiter is quoted `<<'JSON'` (no variable expansion in the JSON body) — the payload goes through bash untouched and Python reads it verbatim from stdin.
 
 ### 7. Persist dims + score + band
 
