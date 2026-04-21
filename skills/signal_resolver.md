@@ -37,7 +37,7 @@ SELECT id, signal_id, attempt_count, created_at
 FROM public.thesis_jobs
 WHERE status = 'needs_scoring'
 ORDER BY created_at ASC
-LIMIT 3
+LIMIT 5
 ```
 
 If no rows → emit `{processed: 0}` and stop. Otherwise, process one row at a time. Operational note: `/alerts` in the dashboard surfaces these rows alongside `queued` / `drafting` thesis jobs so backlog age is visible to operators.
