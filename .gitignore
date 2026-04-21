@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+*.secrets.env
+secrets.env
+*.key
+credentials*.json
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/launch.json
+__pycache__/
+*.pyc
+.pytest_cache/
