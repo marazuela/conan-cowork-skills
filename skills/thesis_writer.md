@@ -357,6 +357,17 @@ UPDATE public.thesis_jobs SET
   gate_reasons = NULL,
   completed_at = now()
 WHERE id = $job_id;
+
+-- Resolve any prior decline rows for THIS job. Late promotions happen when an
+-- earlier draft hit honest_decline_step_6_5 and DLQ'd, then signal_resolver
+-- (or a manual re-trigger) re-drafted and the new draft passed. The earlier
+-- thesis_drafting_failures row is now stale — leaving resolved_at NULL would
+-- surface "AI correctly declined to draft" on /candidates for a thesis that
+-- actually shipped to the watchlist. Point resolved_candidate_id at the
+-- candidate that overruled the decline so the audit trail is preserved.
+UPDATE public.thesis_drafting_failures
+SET resolved_at = now(), resolved_candidate_id = $candidate_id
+WHERE thesis_job_id = $job_id AND resolved_at IS NULL;
 ```
 
 ### 8b. Syntactic gate failed — retry once
