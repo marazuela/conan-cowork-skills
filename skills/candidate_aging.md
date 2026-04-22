@@ -53,15 +53,31 @@ The `stage='B'` filter is load-bearing. Stage A inserts stamp `stage:'A'` in the
 
 For each candidate, in order, check these rules. First match wins:
 
+- **Promote watch → active (2026-04-22 amendment).** `state='watch'` AND catalyst lands in the next 60 days — meaning EITHER:
+  - `next_catalyst_date IS NOT NULL AND next_catalyst_date <= now() + interval '60 days' AND next_catalyst_date >= now() - interval '7 days'`, OR
+  - `next_catalyst_window && tstzrange(now(), now() + interval '60 days', '[]')`.
+
+  Challenger thesis approval is implicit for every `watch` row — thesis_writer only promotes after a `confirm` verdict ([thesis_writer.md:468](./thesis_writer.md)) — so catalyst proximity is the only remaining gate. Then:
+  - SET `candidates.state = 'active'`, `last_aging_evaluated_at = now()`.
+  - INSERT `candidate_events(event_type='state_changed', payload={from:'watch', to:'active', reason:'catalyst_within_60d', source:'candidate_aging', stage:'A'})`.
+  - No `outcomes` row (not a terminal state).
+  - Move to next candidate. No Claude call.
+
+  The lower bound (`next_catalyst_date >= now() - interval '7 days'`) excludes catalysts that already elapsed — those belong to the "elapsed catalyst" Stage B flag below, not to promotion. `tstzrange && ` already handles elapsed windows naturally.
+
+  `thesis_writer` also applies this same rule inline at creation time, so most eligible candidates land in `active` directly without ever sitting in `watch`. This rule catches the rest: (a) candidates whose catalyst was >60d out at creation but has since approached, (b) candidates whose catalyst was added or refined after initial drafting.
+
 - **Aged-out watchlist.** `state='watch'` AND `updated_at < now() - interval '60 days'`:
+
+  Only reached when the promote rule above didn't fire (no near catalyst). Then:
   - SET `candidates.state = 'killed'`, `last_aging_evaluated_at = now()`.
   - INSERT `outcomes(outcome_type='expired', notes='aged_out after 60d on watchlist')`.
   - INSERT `candidate_events(event_type='state_changed', payload={from:'watch', to:'killed', reason:'aged_out', source:'candidate_aging', stage:'A'})`.
   - Move to next candidate. No Claude call.
 
 - **Stale active, no near catalyst.** `state='active'` AND `updated_at < now() - interval '30 days'` AND "no near catalyst" — meaning BOTH:
-  - (`next_catalyst_date IS NULL` OR `next_catalyst_date > now() + interval '30 days'`) AND
-  - (`next_catalyst_window IS NULL` OR `lower(next_catalyst_window) > now() + interval '30 days'`).
+  - (`next_catalyst_date IS NULL` OR `next_catalyst_date > now() + interval '60 days'`) AND
+  - (`next_catalyst_window IS NULL` OR NOT (`next_catalyst_window && tstzrange(now(), now() + interval '60 days', '[]')`)).
 
   Then:
   - SET `candidates.state = 'watch'`, `last_aging_evaluated_at = now()`.
@@ -69,7 +85,7 @@ For each candidate, in order, check these rules. First match wins:
   - No `outcomes` row (it's not a terminal state).
   - Move to next candidate. No Claude call.
 
-  Both predicates are needed: the `candidates_catalyst_exactly_one` CHECK constraint permits one of `(next_catalyst_date, next_catalyst_window)` to be non-NULL. Ignoring the window demotes candidates with a near window (e.g., `Q2 2026` = `[2026-04-01, 2026-06-30]` and a NULL date).
+  The 60-day catalyst threshold is symmetric with the promote rule above — a candidate oscillating between `active` and `watch` day-to-day is a symptom of asymmetric thresholds and would burn auditor attention. Both predicates (date AND window) are needed: the `candidates_catalyst_exactly_one` CHECK constraint permits one of `(next_catalyst_date, next_catalyst_window)` to be non-NULL. Ignoring the window demotes candidates with a near window (e.g., `Q2 2026` = `[2026-04-01, 2026-06-30]` and a NULL date).
 
 - **Elapsed catalyst — flag for Stage B, DO NOT exit.** `state='active'` AND catalyst actually elapsed — meaning EITHER:
   - `next_catalyst_date IS NOT NULL AND next_catalyst_date < now() - interval '7 days'`, OR

@@ -284,7 +284,23 @@ If the RPC raises (non-200 from Modal, or retries exhausted on 502/503/504), sur
 
    Response: `{"uploaded": true, "bucket": "candidates", "path": "<path>", "size_bytes": <n>}`. Use the returned `path` as the `dossier_storage_path` column value in the UPSERT below, and the rendered `markdown` as `dossier_markdown`. Use `$md$...$md$` dollar quoting for the markdown blob so single quotes and backticks in the dossier don't break the SQL literal.
 
-**Then UPSERT. All catalyst/kill/timestamp columns must be set so `candidate_aging` has real data to work with from day one:**
+**Then UPSERT. All catalyst/kill/timestamp columns must be set so `candidate_aging` has real data to work with from day one.**
+
+**Initial-state rule (2026-04-22).** Reaching this step means the challenger returned `confirm` — challenger thesis approval is satisfied for every row written here. The remaining discriminator is catalyst proximity:
+
+- `state='active'` iff a catalyst lands within the next 60 days — either `next_catalyst_date <= now() + interval '60 days'` OR `next_catalyst_window && tstzrange(now(), now() + interval '60 days', '[]')`.
+- Otherwise `state='watch'`. `candidate_aging` Stage A will promote later if the catalyst approaches.
+
+Compute `$initial_state` in the Python step below before binding the UPSERT, so the SQL literal is already resolved:
+
+```python
+# After kill_conditions rendering; before the UPSERT.
+initial_state = "active" if catalyst_within_60d(
+    next_catalyst_date, next_catalyst_window
+) else "watch"
+```
+
+`catalyst_within_60d(date, window)` returns True when the date is non-NULL and ≤ today+60d, OR when the window's lower bound ≤ today+60d AND its upper bound ≥ today. Symmetric check with the Stage A rule in [candidate_aging.md](./candidate_aging.md) §3.
 
 ```sql
 -- Upsert candidate keyed on (ticker, mic)
@@ -295,7 +311,7 @@ INSERT INTO public.candidates (
   next_catalyst_date, next_catalyst_window,
   thesis_approved_at, last_aging_evaluated_at
 ) VALUES (
-  $ticker, $mic, $entity_id, 'watch', $scoring_profile,
+  $ticker, $mic, $entity_id, $initial_state, $scoring_profile,
   $score_with_bonus, $band_with_bonus, $markdown, $storage_path,
   $kill_conditions_jsonb,
   $next_catalyst_date, $next_catalyst_window,
@@ -314,6 +330,8 @@ ON CONFLICT (ticker, mic) DO UPDATE SET
   updated_at = now()
 RETURNING id, (xmax = 0) AS was_inserted;
 ```
+
+**Re-draft caveat.** The UPDATE branch intentionally does NOT touch `state` — a convergence re-draft shouldn't promote a candidate that's currently `killed`/`delivered`, and shouldn't silently demote an already-`active` one. Initial-state computation applies only to the INSERT path; `candidate_aging` owns all subsequent transitions.
 
 `was_inserted` picks the event_type for the next write: **`'created'` on insert, `'thesis_drafted_by_claude'` on update** (convergence re-draft). Both types are in the fanout webhook's email-triggering set ([fanout/index.ts:101](supabase/functions/fanout/index.ts)); `thesis_updated` is NOT — do not use it here or re-drafts will send no notification.
 
