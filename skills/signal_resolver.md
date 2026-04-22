@@ -88,35 +88,36 @@ Produce a JSON object with this exact shape:
 
 Use the **profile-specific rubric** below for what each dim's 1/3/5 value actually means. Don't guess — if the research didn't support a confident value, score 3 and say so in the reasoning (e.g. `"no data on termination fee — neutral midpoint"`). The gate accepts a conservative-3 value with honest reasoning; it rejects guessed high/low values without evidence.
 
-### 6. Rescore via Python
+### 6. Rescore via the `rpc_rescore_with_dims` RPC
 
-Pipe the payload to Python over stdin — do **not** stage through `/tmp`. The Cowork VM's `/tmp` is permission-denied on some runs; a past stuck-claim incident (2026-04-21 23:05 UTC) traced to `bash: /tmp/resolver_*.json: Permission denied` followed by an abandoned `status='scoring'` row that held the per-task concurrency slot and blocked every subsequent dispatch. Read JSON from stdin instead; no filesystem staging.
+Call `public.rpc_rescore_with_dims` through the Supabase MCP. The RPC POSTs to a Modal endpoint (`modal_workers/app.py::rescore_with_dims_endpoint`) that wraps the same `rubric_engine.rescore_with_dims` helper the old bash path used — byte-identical scoring logic. This replaces the `python3 -c ... <<'JSON'` stdin pipe, which became unusable when the Cowork Linux sandbox stopped starting on 2026-04-22 (earlier symptoms: `/tmp` permission-denied followed by abandoned `status='scoring'` rows that held the concurrency slot).
 
-```bash
-cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
-python3 -c '
-import json, sys
-from modal_workers.shared.rubric_engine import rescore_with_dims
-blob = json.load(sys.stdin)
-out = rescore_with_dims(
-    blob["scoring_profile"], blob["raw_payload"], blob["dims"],
-    provenance="ai_resolved",
-)
-print(json.dumps({
-    "score": out["score"], "band": out["band"],
-    "dimensions_with_provenance": out["dimensions_with_provenance"],
-    "auto_caps_triggered": out["auto_caps_triggered"],
-}))
-' <<'JSON'
-{
-  "scoring_profile": "<profile>",
-  "raw_payload": <original signals.raw_payload>,
-  "dims": <dimensions dict from step 5>
-}
-JSON
+**Dollar-quote every JSON payload** (`$json$...$json$`). The Supabase MCP's `execute_sql` has no bind-parameter support; a single quote, backtick, or `$$` anywhere in the signal narrative will break an unquoted string literal and DLQ the row silently.
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_rescore_with_dims(
+  scoring_profile := '<profile>',
+  raw_payload     := $json$<original signals.raw_payload as compact JSON>$json$::jsonb,
+  dims            := $json$<dimensions dict from step 5 as compact JSON>$json$::jsonb,
+  provenance      := 'ai_resolved'
+) AS result;
 ```
 
-The `python3 -c '...'` script is single-quoted (no shell interpolation) and the heredoc delimiter is quoted `<<'JSON'` (no variable expansion in the JSON body) — the payload goes through bash untouched and Python reads it verbatim from stdin.
+Response shape (all required for step 7):
+
+```json
+{
+  "score": <number>,
+  "band": "immediate" | "watchlist" | "archive" | "discard",
+  "dimensions": {...},
+  "dimensions_with_provenance": { ..., "_provenance": "ai_resolved" },
+  "auto_caps_triggered": [ ... ],
+  "scoring_profile": "<profile>"
+}
+```
+
+If the RPC raises (non-200 from Modal, or the helper's one built-in retry on 502/503/504 is exhausted), surface the Postgres error to the session log and leave the job in `status='scoring'`. Step 1's stuck-scoring sweeper will reclaim it on the next run — do not manually reset; `attempt_count` is the retry budget.
 
 ### 7. Persist dims + score + band
 
@@ -234,8 +235,8 @@ Tables touched (all same as thesis_writer, plus one new transition):
 
 ## Reference
 
-- Rescore helper: `modal_workers.shared.rubric_engine.rescore_with_dims`.
-- Gate: `modal_workers.shared.candidate_gate.assess_thesis_v2`.
-- Dossier renderer: `modal_workers.shared.candidate_gate.render_candidate_markdown_v2`.
+- Rescore RPC: `public.rpc_rescore_with_dims(scoring_profile, raw_payload, dims, provenance)` → Modal `rescore-with-dims` endpoint → `modal_workers.shared.rubric_engine.rescore_with_dims`.
+- Gate RPC: `public.rpc_assess_thesis(thesis)` → Modal `assess-thesis` endpoint → `modal_workers.shared.candidate_gate.assess_thesis_v2`.
+- Dossier renderer RPC: `public.rpc_render_candidate_markdown(args)` → Modal `render-candidate-markdown` endpoint → `modal_workers.shared.candidate_gate.render_candidate_markdown_v2`.
 - Exemplar thesis (for the inline-draft step): `unified_system/unified_system/candidates/AXSM_ADA_PDUFA.md`.
 - Profile weight tables: `modal_workers/shared/rubric_engine.py:WEIGHTS`.

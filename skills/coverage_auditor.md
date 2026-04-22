@@ -194,7 +194,7 @@ Note: the ON CONFLICT target must match the existing `operator_flags_open_uniq` 
 
 ### 6. Render the weekly markdown report
 
-Build a plain-text summary and upload to Supabase Storage at `reports/coverage/<iso_week>.md`. Use the MCP's `execute_sql` for the queries, then a normal bash `curl` to PUT the markdown via the Storage REST API (service-role auth already in env).
+Build a plain-text summary and upload to Supabase Storage at `reports/coverage/<iso_week>.md`. Use the MCP's `execute_sql` for the queries, then call `public.rpc_storage_upload` via the same MCP to PUT the markdown (replaces the old bash `curl`, which stopped working when the Cowork Linux sandbox failed to start on 2026-04-22; the RPC POSTs to a Modal endpoint that wraps the same `PUT /storage/v1/object/...` call with service-role auth).
 
 Report skeleton:
 
@@ -232,17 +232,21 @@ For each scanner that emitted anything in the window, count:
 - emissions_to_material_catalyst (fraction whose ticker matched a catalyst_universe row)
 ```
 
-Storage upload (bash):
+Storage upload (Supabase RPC):
 
-```bash
-curl -X PUT \
-  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-  -H "Content-Type: text/markdown" \
-  -H "x-upsert: true" \
-  --data-binary "@/tmp/coverage_${ISO_WEEK}.md" \
-  "${SUPABASE_URL}/storage/v1/object/reports/coverage/${ISO_WEEK}.md"
 ```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_storage_upload(
+  'reports',
+  'coverage/' || '<iso_week>' || '.md',
+  $md$<full rendered markdown report from the skeleton above>$md$,
+  'text/markdown'
+) AS result;
+```
+
+Response: `{"uploaded": true, "bucket": "reports", "path": "coverage/<iso_week>.md", "size_bytes": <n>}`. Use `$md$...$md$` dollar quoting so single quotes, backticks, and table pipes in the rendered report survive SQL literal parsing. Re-running overwrites the prior week's file (the Modal endpoint sets `x-upsert: true`).
+
+Note: the `reports` bucket previously disallowed `text/markdown` MIME uploads — a config bug silently broke the bash curl path. Fixed 2026-04-22 via `storage.buckets.allowed_mime_types += 'text/markdown'`.
 
 ### 7. Emit a skill-output summary line per bucket
 

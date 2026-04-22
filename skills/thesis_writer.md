@@ -220,24 +220,22 @@ UPDATE public.thesis_jobs SET challenge_count = challenge_count + 1 WHERE id = $
 # Append {draft, challenge_verdict} to all_drafts for audit.
 ```
 
-### 7. Validate via the syntactic gate
+### 7. Validate via the syntactic gate (`rpc_assess_thesis`)
 
-Pipe the draft to Python over stdin — do **not** stage through `/tmp`. The Cowork VM's `/tmp` is permission-denied on some runs; a past stuck-claim incident (signal_resolver, 2026-04-21 23:05 UTC) traced to `bash: /tmp/*.json: Permission denied` followed by an abandoned `status='scoring'` row that held the per-task concurrency slot and blocked every subsequent dispatch. The same failure mode applies to this gate call — if the temp file write fails, the job can strand in `status='drafting'` and lock the thesis_writer slot.
+Call `public.rpc_assess_thesis` through the Supabase MCP. The RPC POSTs to a Modal endpoint (`modal_workers/app.py::assess_thesis_endpoint`) that wraps the same `candidate_gate.assess_thesis_v2` helper the old bash path used — byte-identical validation logic. This replaces the `python3 -c ... <<'JSON'` stdin pipe, which became unusable when the Cowork Linux sandbox stopped starting on 2026-04-22 (earlier symptoms: `/tmp` permission-denied stranding `status='drafting'` rows and locking the thesis_writer slot).
 
-```bash
-cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
-python3 -c '
-import json, sys
-from modal_workers.shared.candidate_gate import assess_thesis_v2
-thesis = json.load(sys.stdin)
-ok, reasons = assess_thesis_v2(thesis)
-print(json.dumps({"ok": ok, "reasons": reasons}))
-' <<'JSON'
-<paste the JSON from step 6>
-JSON
+**Dollar-quote every JSON payload** (`$json$...$json$`). The Supabase MCP's `execute_sql` has no bind-parameter support; a single quote, backtick, or `$$` in the thesis prose will break an unquoted string literal and DLQ the row silently.
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_assess_thesis(
+  $json$<the thesis JSON from step 6>$json$::jsonb
+) AS result;
 ```
 
-The `python3 -c '...'` script is single-quoted (no shell interpolation) and the heredoc delimiter is quoted `<<'JSON'` (no variable expansion in the thesis body) — the payload goes through bash untouched and Python reads it verbatim from stdin.
+Response shape: `{"ok": <bool>, "reasons": [<str>, ...]}`. Proceed to step 8a on `ok=true`; branch to step 8b on `ok=false`.
+
+If the RPC raises (non-200 from Modal, or retries exhausted on 502/503/504), surface the Postgres error and leave the job in `status='drafting'`. Step 1's stuck-drafting sweeper reclaims it; `attempt_count` is the retry budget.
 
 ### 8a. Gate passed → promote
 
@@ -253,7 +251,38 @@ The `python3 -c '...'` script is single-quoted (no shell interpolation) and the 
    - `"Month YYYY"` (e.g. `July 2026`) → first-to-last day of that month.
    - Daterange literal syntax: `'[2026-04-01,2026-06-30]'::daterange`.
 
-3. **Render markdown** with `render_candidate_markdown_v2` from `modal_workers.shared.candidate_gate`. Upload to Storage at `candidates/<YYYY>/<MM>/<ticker>_<signal_id>.md` for a canonical per-signal copy (keeping `<signal_id>` in the path means convergence re-drafts don't overwrite prior dossiers — the prior markdown stays accessible for audit).
+3. **Render markdown + upload via the `rpc_*` RPCs** (replaces the old bash `python3 -c` + `curl` path broken by the Cowork Linux sandbox outage of 2026-04-22; identical output because the Modal endpoint wraps the same `candidate_gate.render_candidate_markdown_v2` helper).
+
+   First render:
+
+   ```
+   mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+   SELECT public.rpc_render_candidate_markdown(
+     $json${
+       "signal":          <signals row as compact JSON>,
+       "thesis":          <the thesis JSON from step 6>,
+       "band":            "<band_with_bonus>",
+       "scoring_profile": "<scoring_profile>",
+       "entity":          <entities row as compact JSON, optional>
+     }$json$::jsonb
+   ) AS result;
+   ```
+
+   Response: `{"markdown": "<full dossier as string>"}`.
+
+   Then upload at `candidates/<YYYY>/<MM>/<ticker>_<signal_id>.md` — keeping `<signal_id>` in the path means convergence re-drafts don't overwrite prior dossiers, so the prior markdown stays accessible for audit:
+
+   ```
+   mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+   SELECT public.rpc_storage_upload(
+     'candidates',
+     '<YYYY>/<MM>/<ticker>_<signal_id>.md',
+     $md$<markdown string from the prior rpc_render_candidate_markdown response>$md$,
+     'text/markdown'
+   ) AS result;
+   ```
+
+   Response: `{"uploaded": true, "bucket": "candidates", "path": "<path>", "size_bytes": <n>}`. Use the returned `path` as the `dossier_storage_path` column value in the UPSERT below, and the rendered `markdown` as `dossier_markdown`. Use `$md$...$md$` dollar quoting for the markdown blob so single quotes and backticks in the dossier don't break the SQL literal.
 
 **Then UPSERT. All catalyst/kill/timestamp columns must be set so `candidate_aging` has real data to work with from day one:**
 
@@ -409,7 +438,7 @@ Loop to step 2 until `thesis_jobs` queue is empty or the 5-row batch is exhauste
 
 ## Reference data
 
-- Syntactic gate rules: `modal_workers/shared/candidate_gate.py` (v2 is `assess_thesis_v2`). Do not inline-reimplement; call via Bash.
+- Syntactic gate rules: `modal_workers/shared/candidate_gate.py` (v2 is `assess_thesis_v2`). Do not inline-reimplement; call via `public.rpc_assess_thesis` (wraps the same helper on the `assess-thesis` Modal endpoint).
 - Semantic gate (challenger): separate Claude app routine with adversarial "skeptical IC reviewer" system prompt. Routine name + endpoint managed in the Anthropic console. The ITRK archetype is explicitly named in the challenger's system prompt as the pattern to catch.
 - Dossier renderer: `render_candidate_markdown_v2` from the same module.
 - Exemplar (good quality): `unified_system/unified_system/candidates/AXSM_ADA_PDUFA.md`. Study it for tone, depth, tag density, and specificity of asymmetry claims.

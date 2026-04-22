@@ -179,23 +179,21 @@ For each update in `kill_condition_updates` with `new_status='triggered'`:
 
 1. Look up the original kill_condition from `candidates.kill_conditions` by `id`. Extract `observable.search_pattern`.
 2. Match the claimed `evidence_url` to a signal in the step-4 payload. Fetch that signal's `raw_payload` + `source_url`.
-3. Run the Python regex (case-insensitive unless the pattern already has flags):
+3. Run the Python regex via `public.rpc_regex_check` (case-insensitive unless the pattern already embeds inline flags in its first 5 chars, e.g. `(?i)`). The RPC POSTs to a Modal endpoint (`modal_workers/app.py::regex_check_endpoint`) that uses Python `re.search` with identical flag-detection to the old bash path. This replaces the `python3 -c ...` shell-out broken by the Cowork Linux sandbox outage of 2026-04-22.
 
-```bash
-cd "${CONAN_ROOT:?CONAN_ROOT must point to your marazuela/conan checkout}"
-python3 -c "
-import json, re, sys
-pattern = '''<observable.search_pattern>'''
-payload = json.loads('''<signal.raw_payload JSON>''')
-source_url = '''<signal.source_url>'''
-haystack = json.dumps(payload) + ' ' + source_url
-flags = 0 if '(?' in pattern[:5] else re.IGNORECASE
-match = re.search(pattern, haystack, flags)
-print('MATCH' if match else 'NO_MATCH')
-"
+Build the haystack as `json_compact(signal.raw_payload) + ' ' + signal.source_url`, then:
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_regex_check(
+  $pat$<observable.search_pattern>$pat$,
+  $hay$<json_compact(signal.raw_payload)> <signal.source_url>$hay$
+) AS result;
 ```
 
-If the result is `NO_MATCH`:
+Response: `{"matched": <bool>, "match": "<first matched substring>" | null}`. Treat `matched=false` as `NO_MATCH`. Use `$pat$...$pat$` and `$hay$...$hay$` dollar quoting so regex metacharacters and signal payload content survive SQL literal parsing.
+
+If the result is `NO_MATCH` (`matched=false`):
 - Rewrite this update to `new_status='pending'` (do NOT commit the triggered claim).
 - Log to `candidate_aging_failures` with a correctly-computed `consecutive_failures` (look up the prior row and increment; this is what drives the `operator_flags` surfacing in spec §7.5):
   ```sql
@@ -315,7 +313,7 @@ Loop to step 3 until the candidate list from step 1 is drained or the quota is h
 - Kill-condition shape: `candidates.kill_conditions` is a JSONB array of `{id, description, observable: {source_type, search_pattern, filing_type?, url_pattern_hint?}, date_bound?, status}`. Status vocabulary: `pending | triggered | cleared`.
 - Recent-signal window: 14d standard, 30d if any signal in the group has `scoring_profile='litigation'` (matches the reactor's `window_days()` rule).
 - convergence_key query pattern: see `modal_workers/shared/rubric_engine.py::convergence_reference()` for the audit-parity reference.
-- Regex matching: always `re.IGNORECASE` unless the kill_condition's pattern already contains `(?i)` or similar inline flags.
+- Regex matching: `public.rpc_regex_check(pattern, text)` → Modal `regex-check` endpoint → Python `re.search`. Defaults to `re.IGNORECASE` unless the pattern embeds an inline flag group in its first 5 chars (e.g. `(?i)`, `(?im)`, `^(?i)`) — same rule as the old bash path.
 
 ## Supabase cheatsheet (project_id=xvwvwbnxdsjpnealarkh)
 
