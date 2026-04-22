@@ -734,40 +734,52 @@ def promote(signal: SignalRecord, thesis: ThesisDict, *,
 
 ### 7.2 Scanner functions (17)
 
-Each scanner is its own Modal function. Shared `image` bundles all `modal_workers/` code. Cadences map:
+Each scanner is its own Modal `_once` function. Shared `image` bundles all `modal_workers/` code. Schedules come from three dispatcher crons, not per-scanner — the Modal free-tier 5-cron limit is at capacity, so we fan out from three dispatchers into N scanner spawns each tick.
 
-| Scanner | Cadence | Modal schedule | Hard timeout | Secrets needed |
+**Dispatch model (2026-04-22 release-time amendment):**
+
+| Dispatcher | Schedule | Source of scanner list |
+|---|---|---|
+| `dispatch_3h` | `Period(hours=3)` | Hardcoded `_SCANNERS_3H` (only `edgar_filing_monitor`) |
+| `dispatch_release_times` | `Cron("0 6,8,13,17,21 * * *")` | Registry: `scanners` where `cadence='daily' AND status='operational' AND scheduled_hour_utc = current_hour_utc`. NULL `scheduled_hour_utc` defaults to the 13 UTC bucket. Fetchers (non-registry) hardcoded per-hour via `_FETCHERS_AT_HOUR`. |
+| `dispatch_weekly` | `Cron("0 12 * * 1")` | Hardcoded `_SCANNERS_WEEKLY` |
+
+Retiming a scanner is a single `UPDATE public.scanners SET scheduled_hour_utc = <hour> WHERE name = <name>` — no redeploy needed. The column accepts 0–23 (validated by a CHECK constraint) or NULL (routes to 13 UTC default).
+
+**Cadence + release-time map:**
+
+| Scanner | Cadence | Release-time (UTC) | Hard timeout | Secrets needed |
 |---|---|---|---|---|
-| edgar_filing_monitor | 3h | `Period(hours=3)` | 120 | SEC_USER_AGENT, OPENFIGI_API_KEY |
-| fda_pdufa_pipeline | 3h | `Period(hours=3)` | 120 | OPENFIGI_API_KEY |
-| lse_rns_scanner | 3h | `Period(hours=3)` | 120 | OPENFIGI_API_KEY |
-| tdnet_scanner | 3h | `Period(hours=3)` | 120 | OPENFIGI_API_KEY |
-| asx_scanner | 3h | `Period(hours=3)` | 120 | OPENFIGI_API_KEY |
-| esma_short_scanner | daily | `Cron("5 9 * * *")` | 120 | OPENFIGI_API_KEY |
-| congressional_trading | daily | `Cron("10 9 * * *")` | 120 | — |
-| sedar_plus_scanner | daily | `Cron("15 9 * * *")` | 120 | OPENFIGI_API_KEY |
-| hkex_scanner | daily | `Cron("20 9 * * *")` | 120 | OPENFIGI_API_KEY |
-| kind_scanner | daily | `Cron("25 9 * * *")` | 120 | OPENDART_KEY (auth_required when missing) |
-| bse_nse_scanner | daily | `Cron("30 9 * * *")` | 120 | OPENFIGI_API_KEY |
-| cvm_scanner | daily | `Cron("35 9 * * *")` | 120 | — |
-| bmv_scanner | daily | `Cron("40 9 * * *")` | 60 | — |
-| courtlistener_scanner | daily | `Cron("45 9 * * *")` | 120 | COURTLISTENER_TOKEN (auth_required when missing) |
-| sec_enforcement_scanner | daily | `Cron("50 9 * * *")` | 60 | SEC_USER_AGENT |
-| takeover_candidate_scanner | weekly | `Cron("0 10 * * 1")` | 180 | SEC_USER_AGENT, OPENFIGI_API_KEY |
-| pre_phase3_readout_scanner | weekly | `Cron("5 10 * * 1")` | 180 | OPENFIGI_API_KEY |
+| edgar_filing_monitor | 3h | Period(hours=3) | 120 | SEC_USER_AGENT, OPENFIGI_API_KEY |
+| fda_pdufa_pipeline | daily | 13 (US pre-open) | 120 | OPENFIGI_API_KEY |
+| lse_rns_scanner | daily | 06 (EU pre-open) | 120 | OPENFIGI_API_KEY |
+| esma_short_scanner | daily | 06 (EU morning) | 120 | OPENFIGI_API_KEY |
+| bse_nse_scanner | daily | 06 (India pre-close sweep) | 120 | OPENFIGI_API_KEY |
+| asx_scanner | daily | 08 (ASX post-close) | 120 | OPENFIGI_API_KEY |
+| tdnet_scanner | daily | 08 (TSE post-close) | 120 | OPENFIGI_API_KEY |
+| hkex_scanner | daily | 08 (HKEX post-close) | 120 | OPENFIGI_API_KEY |
+| kind_scanner | daily | 08 (KRX post-close) | 120 | OPENDART_KEY (auth_required when missing) |
+| cvm_scanner | daily | 13 (BR morning) | 120 | — |
+| sedar_plus_scanner | daily | 13 (Canada, US-aligned) | 120 | OPENFIGI_API_KEY |
+| bmv_scanner | daily | 13 (MX pre-open) | 60 | — |
+| congressional_trading | daily | 17 (US midday — STOCK Act filing window) | 120 | — |
+| sec_enforcement_scanner | daily | 21 (US post-close — SEC press cadence) | 60 | SEC_USER_AGENT |
+| courtlistener_scanner | daily | 21 (court dockets settle post-close) | 120 | COURTLISTENER_TOKEN (auth_required when missing) |
+| takeover_candidate_scanner | weekly | Mon 12:00 UTC | 180 | SEC_USER_AGENT, OPENFIGI_API_KEY |
+| pre_phase3_readout_scanner | weekly | Mon 12:00 UTC | 180 | OPENFIGI_API_KEY |
+
+**Fetchers** (catalyst-universe, not signal-emitters): `fda_adcomm_pdufa` and `sec_8k_mna` fire in the 13 UTC bucket via hardcoded `_FETCHERS_AT_HOUR` since they have no registry row.
 
 Skeleton for every scanner (full example for edgar in Appendix C):
 
 ```python
-@app.function(
-    image=image,
-    schedule=modal.Period(hours=3),
-    timeout=120,
-    secrets=[scanner_secrets, supabase_secrets],
-)
-def edgar_filing_monitor() -> ScannerResult:
-    from modal_workers.scanners.edgar_filing_monitor import scan
-    return run_scanner("edgar_filing_monitor", scan)
+# Each scanner exposes an `_once` callable — no per-scanner schedule. The
+# dispatcher crons spawn these in parallel at each tick. Timeouts still apply
+# per-call; status gating (operational vs paused) reads the registry inside
+# _dispatch() before spawning.
+@app.function(image=image, timeout=120, secrets=[scanner_secrets, supabase_secrets])
+def edgar_filing_monitor_once() -> dict:
+    return _run("edgar_filing_monitor")
 ```
 
 Auxiliary Modal functions:
