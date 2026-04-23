@@ -96,6 +96,20 @@ Budget ≤4 WebSearch queries for dim estimation. Aim for:
 
 Record every URL + retrieval date + a ≥40-char finding. You'll reuse these for the thesis step if the signal lands at immediate (total budget still ≤6 across both steps, matching thesis_writer).
 
+**SEC / EDGAR URLs (`*.sec.gov`) — do NOT use WebFetch.** SEC's fair-access policy 403s WebFetch's default User-Agent; aggregators like stocktitan.net or marketscreener.com are NOT acceptable substitutes for primary-source citations. Use the `rpc_edgar_fetch` RPC, which routes the request through the Modal `edgar-fetch` endpoint with the same SEC_USER_AGENT the in-worker scanners use:
+
+```
+-- Enqueue:
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_edgar_fetch($json$<sec.gov URL>$json$) AS request_id;
+
+-- Collect (separate call — see the two-statement pattern in step 6):
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_compute_collect($request_id, 60000) AS result;
+```
+
+The `result` jsonb shape is `{status, content, content_type, final_url, truncated}`. Only `*.sec.gov` hosts are accepted; any other host raises. Cite the URL you passed to `rpc_edgar_fetch`, dated with the retrieval timestamp. Non-SEC primary sources (CourtListener, FCA, BaFin, etc.) continue to use WebFetch.
+
 ### 5. Estimate dims
 
 Produce a JSON object with this exact shape:
