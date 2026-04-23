@@ -68,6 +68,26 @@ SELECT name, geography, default_scoring_profile
 FROM public.scanners WHERE id = $signal.scanner_id;
 ```
 
+### 3.5. Pre-empt signals with no fitting rubric
+
+**Skip scanners whose PTR/filing-type has no natural fit in the six locked scoring profiles.** Trying to shoehorn these into a wrong-fit profile produces `insufficient_evidence` on every dim — a known pattern we've already observed for `congressional_trading` against `activist_governance` (12/12 PTRs archived with insufficient_evidence before this pre-empt was added).
+
+Maintain this skip list in the skill until D-014 is reopened and the profile count expands:
+
+- `congressional_trading` — STOCK Act Periodic Transaction Reports. No `congressional_trading` profile in `rubric_engine.WEIGHTS`; the six current rubrics don't contain dims that match "member of Congress transacted this ticker". Scanner's `default_scoring_profile='activist_governance'` is a historical mismatch.
+
+If `scanner.name` is in the skip list:
+
+```sql
+UPDATE public.thesis_jobs
+SET status = 'scoring_complete_below_immediate',
+    completed_at = now(),
+    gate_reasons = coalesce(gate_reasons, '{}') || ARRAY['deferred_no_profile:' || $scanner_name]
+WHERE id = $job_id;
+```
+
+Then loop to step 1 for the next job. Do NOT consume research or rescore budget.
+
 ### 4. Research
 
 Budget ≤4 WebSearch queries for dim estimation. Aim for:
