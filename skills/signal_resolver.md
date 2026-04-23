@@ -24,7 +24,9 @@ You are the signal-resolver for the Conan v2 investment research system. Scanner
 
 ```sql
 UPDATE public.thesis_jobs
-SET status = 'needs_scoring', started_at = NULL
+SET status = 'needs_scoring',
+    started_at = NULL,
+    gate_reasons = coalesce(gate_reasons, '{}') || ARRAY['stuck_scoring_skill_reset']
 WHERE status = 'scoring'
   AND started_at < now() - interval '30 minutes';
 ```
@@ -117,7 +119,15 @@ Response shape (all required for step 7):
 }
 ```
 
-If the RPC raises (non-200 from Modal, or the helper's one built-in retry on 502/503/504 is exhausted), surface the Postgres error to the session log and leave the job in `status='scoring'`. Step 1's stuck-scoring sweeper will reclaim it on the next run — do not manually reset; `attempt_count` is the retry budget.
+If the RPC raises (non-200 from Modal, or the helper's one built-in retry on 502/503/504 is exhausted): **before** leaving the row, classify the error from the Postgres error message into one of `modal_5xx` / `modal_4xx` / `timeout` / `payload_invalid` / `unknown` and tag the job:
+
+```sql
+UPDATE public.thesis_jobs
+SET gate_reasons = coalesce(gate_reasons, '{}') || ARRAY['rescore_rpc_failure:<short_class>']
+WHERE id = $job_id;
+```
+
+Then surface the Postgres error to the session log and leave the row in `status='scoring'` so step 1's sweeper (or the Modal SLA sweeper) reclaims it on the next run. Do not manually reset; `attempt_count` is the retry budget. The dollar-quote rule from the rescore call still applies if the short_class string ever embeds an arbitrary substring.
 
 ### 7. Persist dims + score + band
 
