@@ -272,7 +272,20 @@ Loop to step 1 until the batch is drained.
 
 ### `litigation` (6 dims)
 
-- **`financial_materiality`**: damages claim vs market cap. 5 = >50% of market cap; 4 = 20-50%; 3 = 5-20%; 2 = 1-5%; 1 = <1% or non-monetary only.
+- **`financial_materiality`**: damages claim vs market cap. 5 = >50% of market cap; 4 = 20-50%; 3 = 5-20%; 2 = 1-5%; 1 = <1% or non-monetary only. **Do NOT read `entities.market_cap_usd`** — that column has no writer and is 100% NULL (as of 2026-04-23). Fetch a live snapshot via `rpc_market_snapshot` using the same two-statement pattern as the other compute RPCs:
+
+    ```
+    -- Enqueue:
+    mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+    SELECT public.rpc_market_snapshot($json$<ticker>$json$, $json$<mic_or_null>$json$) AS request_id;
+
+    -- Collect (separate call):
+    mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+    SELECT public.rpc_compute_collect($request_id, 60000) AS result;
+    ```
+
+    `result->>market_cap_usd` is a yfinance-backed USD value (or NULL if `source_liveness='unavailable'`). If unavailable, score `financial_materiality=3` with reasoning "market cap unavailable — mcap source returned unavailable". Cite the snapshot's `market_snapshot_source` + `market_snapshot_at` in your reasoning.
+
 - **`legal_outcome_probability`**: strength of the filer's case. 5 = binding precedent + summary-judgment motion granted; 3 = colorable claim; 1 = novel theory or failed jurisdiction.
 - **`market_pricing`**: how much is already priced in. 5 = clearly unpriced (stock flat on filing); 3 = some reaction; 1 = fully-priced (stock already moved materially).
 - **`resolution_timeline`**: days to next status event. 5 = ≤30 days; 3 = 30-180; 1 = >365.
