@@ -96,6 +96,10 @@ Call `public.rpc_rescore_with_dims` through the Supabase MCP. The RPC POSTs to a
 
 **Dollar-quote every JSON payload** (`$json$...$json$`). The Supabase MCP's `execute_sql` has no bind-parameter support; a single quote, backtick, or `$$` anywhere in the signal narrative will break an unquoted string literal and DLQ the row silently.
 
+**Two-statement pattern.** As of 2026-04-23 (migration `20260429020000_compute_rpcs_split_call.sql`), every compute RPC is split into an enqueue (returns `bigint` request_id) and a collect (polls `net._http_response`, returns the actual jsonb). This works around a pg_net in-transaction visibility bug that made the old single-call pattern deadlock for 60s every time. Always issue these as **two separate `execute_sql` calls** — do not wrap them in a single statement or the deadlock returns.
+
+Call 1 — enqueue:
+
 ```
 mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
 SELECT public.rpc_rescore_with_dims(
@@ -103,7 +107,16 @@ SELECT public.rpc_rescore_with_dims(
   raw_payload     := $json$<original signals.raw_payload as compact JSON>$json$::jsonb,
   dims            := $json$<dimensions dict from step 5 as compact JSON>$json$::jsonb,
   provenance      := 'ai_resolved'
-) AS result;
+) AS request_id;
+```
+
+Capture `request_id` (a bigint) from the response.
+
+Call 2 — collect (separate `execute_sql`):
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_compute_collect(<request_id>, 40000) AS result;
 ```
 
 Response shape (all required for step 7):
@@ -119,7 +132,7 @@ Response shape (all required for step 7):
 }
 ```
 
-If the RPC raises (non-200 from Modal, or the helper's one built-in retry on 502/503/504 is exhausted): **before** leaving the row, classify the error from the Postgres error message into one of `modal_5xx` / `modal_4xx` / `timeout` / `payload_invalid` / `unknown` and tag the job:
+If **either** statement raises (non-200 from Modal, pg_net transport error, or collect timeout at 40s): **before** leaving the row, classify the error from the Postgres error message into one of `modal_5xx` / `modal_4xx` / `timeout` / `payload_invalid` / `unknown` and tag the job:
 
 ```sql
 UPDATE public.thesis_jobs
@@ -127,7 +140,7 @@ SET gate_reasons = coalesce(gate_reasons, '{}') || ARRAY['rescore_rpc_failure:<s
 WHERE id = $job_id;
 ```
 
-Then surface the Postgres error to the session log and leave the row in `status='scoring'` so step 1's sweeper (or the Modal SLA sweeper) reclaims it on the next run. Do not manually reset; `attempt_count` is the retry budget. The dollar-quote rule from the rescore call still applies if the short_class string ever embeds an arbitrary substring.
+Then surface the Postgres error to the session log and leave the row in `status='scoring'` so step 1's sweeper (or the Modal SLA sweeper) reclaims it on the next run. Do not manually reset; `attempt_count` is the retry budget. The split-call migration dropped the old helper's 502/503/504 one-retry — every retry now flows through `attempt_count` and `gate_reasons`, so a Modal redeploy blip may surface here as a hard raise on one run and succeed on the next sweeper pass. The dollar-quote rule from the rescore call still applies if the short_class string ever embeds an arbitrary substring.
 
 ### 7. Persist dims + score + band
 
@@ -245,8 +258,9 @@ Tables touched (all same as thesis_writer, plus one new transition):
 
 ## Reference
 
-- Rescore RPC: `public.rpc_rescore_with_dims(scoring_profile, raw_payload, dims, provenance)` → Modal `rescore-with-dims` endpoint → `modal_workers.shared.rubric_engine.rescore_with_dims`.
-- Gate RPC: `public.rpc_assess_thesis(thesis)` → Modal `assess-thesis` endpoint → `modal_workers.shared.candidate_gate.assess_thesis_v2`.
-- Dossier renderer RPC: `public.rpc_render_candidate_markdown(args)` → Modal `render-candidate-markdown` endpoint → `modal_workers.shared.candidate_gate.render_candidate_markdown_v2`.
+- Rescore RPC: `public.rpc_rescore_with_dims(scoring_profile, raw_payload, dims, provenance) → bigint request_id` → Modal `rescore-with-dims` endpoint → `modal_workers.shared.rubric_engine.rescore_with_dims`. Pair every enqueue with `public.rpc_compute_collect(request_id, 40000)` in a separate `execute_sql` statement (see step 6).
+- Gate RPC: `public.rpc_assess_thesis(thesis) → bigint request_id` → Modal `assess-thesis` endpoint → `modal_workers.shared.candidate_gate.assess_thesis_v2`. Pair with `rpc_compute_collect`.
+- Dossier renderer RPC: `public.rpc_render_candidate_markdown(args) → bigint request_id` → Modal `render-candidate-markdown` endpoint → `modal_workers.shared.candidate_gate.render_candidate_markdown_v2`. Pair with `rpc_compute_collect`.
+- Collector: `public.rpc_compute_collect(request_id bigint, max_wait_ms int default 40000) → jsonb`. Polls `net._http_response` every 250ms; raises on non-200, pg_net transport error, or timeout. Single source of truth for the wait-for-reply half of every compute RPC.
 - Exemplar thesis (for the inline-draft step): `unified_system/unified_system/candidates/AXSM_ADA_PDUFA.md`.
 - Profile weight tables: `modal_workers/shared/rubric_engine.py:WEIGHTS`.

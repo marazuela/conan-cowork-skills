@@ -232,7 +232,11 @@ For each scanner that emitted anything in the window, count:
 - emissions_to_material_catalyst (fraction whose ticker matched a catalyst_universe row)
 ```
 
-Storage upload (Supabase RPC):
+Storage upload (Supabase RPC).
+
+**Two-statement pattern.** As of 2026-04-23 every `rpc_*` compute call is split across two `execute_sql` statements — enqueue (returns `bigint` request_id), then collect. The single-call form deadlocks for 60s because of a pg_net in-transaction visibility bug. Never collapse the pair into one statement.
+
+Call 1 — enqueue:
 
 ```
 mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
@@ -241,7 +245,14 @@ SELECT public.rpc_storage_upload(
   'coverage/' || '<iso_week>' || '.md',
   $md$<full rendered markdown report from the skeleton above>$md$,
   'text/markdown'
-) AS result;
+) AS request_id;
+```
+
+Call 2 — collect (separate `execute_sql`):
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_compute_collect(<request_id>, 40000) AS result;
 ```
 
 Response: `{"uploaded": true, "bucket": "reports", "path": "coverage/<iso_week>.md", "size_bytes": <n>}`. Use `$md$...$md$` dollar quoting so single quotes, backticks, and table pipes in the rendered report survive SQL literal parsing. Re-running overwrites the prior week's file (the Modal endpoint sets `x-upsert: true`).

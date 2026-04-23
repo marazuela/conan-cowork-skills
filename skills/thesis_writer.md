@@ -170,6 +170,20 @@ If the draft sets `confidence: "low"` OR `insufficient_signal: true`, **skip ste
 
 Spec reference: §7.4 pseudocode — declines skip both the challenger and the syntactic gate; only gate-fails (step 8b) and challenge verdicts (step 8d) earn a retry.
 
+**Structured decline_verdict (preserves audit trail without invoking the challenger).** Before jumping to 8c, append a `decline_verdict` object to `all_drafts[last]` in the same shape as `challenge_verdict` would have been:
+
+```json
+{
+  "verdict": "decline",
+  "reasons": ["≥1 string; specific, structural defect — e.g. 'ITRK archetype: widely-watched event with no named edge', 'single-anchor short with no proximate catalyst', 'crowding pattern with no informational asymmetry'"],
+  "strongest_counter": "≥100 chars. The strongest steelman — why a colleague might say this signal *could* support a thesis — and the specific reason you refused anyway. Honest counter-engagement is the discipline that distinguishes structured decline from hedged prose.",
+  "evidence_citations": [],
+  "caller_spec_sha": "<sha256 of .claude/skills/thesis_challenger.md, computed locally; same SHA the challenger would have echoed back>"
+}
+```
+
+The drafter is the source of this verdict — the challenger routine was NOT invoked for declines. This is the formalized version of what was historically prose-only `final_reasons[0]='routine_declined: ...'`. `final_reasons` stays unchanged for backward compatibility; the structured object is the new audit trail. `challenger_retro` step 5 buckets `decline` verdicts on a 4th axis (over_decline / early_save / timing_save) tracked separately from miss/save metrics.
+
 ### 6.8. Semantic gate — challenger pass (before syntactic gate)
 
 Invoke the **challenger routine** — a separate Claude app routine with an adversarial system prompt ("skeptical IC reviewer; your job is to find the single strongest reason this thesis should NOT be promoted"). Different routine from the drafter, different system prompt, no shared prior. Pass the draft + the underlying signal + filing text + scanner/entity context.
@@ -212,13 +226,23 @@ If `challenge_count >= 2`, skip the challenger on this draft and DLQ with `final
 Invocation (conceptual — actual routine name/endpoint managed Anthropic-side, this skill invokes it via the same Claude session; record the verdict JSON verbatim):
 
 ```
+# Compute caller_spec_sha — the sha256 of thesis_challenger.md as observed locally.
+# This is the CALLER's view of the spec, not a guarantee about the routine's internal
+# prompt. Stamped on the verdict so challenger_retro can detect spec drift between
+# historical runs and today's evaluation.
+CALLER_SPEC_SHA=$(sha256sum .claude/skills/thesis_challenger.md | cut -d' ' -f1)
+
 # Increment counter BEFORE invoking — the counter is advisory but prevents runaway
 UPDATE public.thesis_jobs SET challenge_count = challenge_count + 1 WHERE id = $job_id;
 
-# Invoke: adversarial prompt + {draft, signal, entity, scanner, filing_text}
-# Capture: {verdict, reasons, required_fixes, strongest_counter, evidence_citations}
-# Append {draft, challenge_verdict} to all_drafts for audit.
+# Invoke: adversarial prompt + {draft, signal, entity, scanner, filing_text, caller_spec_sha=$CALLER_SPEC_SHA}
+# Capture: {verdict, reasons, required_fixes, strongest_counter, evidence_citations, caller_spec_sha}
+# Append {draft, challenge_verdict} to all_drafts for audit. The challenger echoes the
+# sha back; persist it on the thesis_drafting_failures row (column challenger_prompt_sha)
+# the FIRST time this job DLQs, so the retro can compare verdict vintage.
 ```
+
+When DLQing the job (steps 8c / 8e), set `thesis_drafting_failures.challenger_prompt_sha = $CALLER_SPEC_SHA` on the INSERT — single value per job (use the most recent challenger invocation's sha, since the prompt could have been edited mid-job in a worst-case race).
 
 ### 7. Validate via the syntactic gate (`rpc_assess_thesis`)
 
@@ -226,16 +250,27 @@ Call `public.rpc_assess_thesis` through the Supabase MCP. The RPC POSTs to a Mod
 
 **Dollar-quote every JSON payload** (`$json$...$json$`). The Supabase MCP's `execute_sql` has no bind-parameter support; a single quote, backtick, or `$$` in the thesis prose will break an unquoted string literal and DLQ the row silently.
 
+**Two-statement pattern.** As of 2026-04-23 every `rpc_*` compute call is split across two `execute_sql` statements — enqueue (returns `bigint` request_id), then collect. The single-call form deadlocks for 60s because of a pg_net in-transaction visibility bug. Never collapse the pair into one statement.
+
+Call 1 — enqueue:
+
 ```
 mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
 SELECT public.rpc_assess_thesis(
   $json$<the thesis JSON from step 6>$json$::jsonb
-) AS result;
+) AS request_id;
+```
+
+Call 2 — collect (separate `execute_sql`):
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_compute_collect(<request_id>, 40000) AS result;
 ```
 
 Response shape: `{"ok": <bool>, "reasons": [<str>, ...]}`. Proceed to step 8a on `ok=true`; branch to step 8b on `ok=false`.
 
-If the RPC raises (non-200 from Modal, or retries exhausted on 502/503/504), surface the Postgres error and leave the job in `status='drafting'`. Step 1's stuck-drafting sweeper reclaims it; `attempt_count` is the retry budget.
+If either statement raises (non-200 from Modal, pg_net transport error, or collect timeout at 40s), surface the Postgres error and leave the job in `status='drafting'`. Step 1's stuck-drafting sweeper reclaims it; `attempt_count` is the retry budget. The split-call migration dropped the old single-retry-on-5xx — every retry now flows through `attempt_count` and sweeper semantics.
 
 ### 8a. Gate passed → promote
 
@@ -253,7 +288,9 @@ If the RPC raises (non-200 from Modal, or retries exhausted on 502/503/504), sur
 
 3. **Render markdown + upload via the `rpc_*` RPCs** (replaces the old bash `python3 -c` + `curl` path broken by the Cowork Linux sandbox outage of 2026-04-22; identical output because the Modal endpoint wraps the same `candidate_gate.render_candidate_markdown_v2` helper).
 
-   First render:
+   Same two-statement pattern as step 7 — this chain is **four** `execute_sql` calls end-to-end (render enqueue, render collect, upload enqueue, upload collect). Never collapse an enqueue and its collect into a single statement.
+
+   First render — call 1 of 4 (enqueue):
 
    ```
    mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
@@ -265,21 +302,37 @@ If the RPC raises (non-200 from Modal, or retries exhausted on 502/503/504), sur
        "scoring_profile": "<scoring_profile>",
        "entity":          <entities row as compact JSON, optional>
      }$json$::jsonb
-   ) AS result;
+   ) AS request_id;
+   ```
+
+   Call 2 of 4 (collect, separate `execute_sql`):
+
+   ```
+   mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+   SELECT public.rpc_compute_collect(<request_id>, 40000) AS result;
    ```
 
    Response: `{"markdown": "<full dossier as string>"}`.
 
-   Then upload at `candidates/<YYYY>/<MM>/<ticker>_<signal_id>.md` — keeping `<signal_id>` in the path means convergence re-drafts don't overwrite prior dossiers, so the prior markdown stays accessible for audit:
+   Then upload at `candidates/<YYYY>/<MM>/<ticker>_<signal_id>.md` — keeping `<signal_id>` in the path means convergence re-drafts don't overwrite prior dossiers, so the prior markdown stays accessible for audit.
+
+   Call 3 of 4 (enqueue):
 
    ```
    mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
    SELECT public.rpc_storage_upload(
      'candidates',
      '<YYYY>/<MM>/<ticker>_<signal_id>.md',
-     $md$<markdown string from the prior rpc_render_candidate_markdown response>$md$,
+     $md$<markdown string from the prior rpc_compute_collect response>$md$,
      'text/markdown'
-   ) AS result;
+   ) AS request_id;
+   ```
+
+   Call 4 of 4 (collect, separate `execute_sql`):
+
+   ```
+   mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+   SELECT public.rpc_compute_collect(<request_id>, 40000) AS result;
    ```
 
    Response: `{"uploaded": true, "bucket": "candidates", "path": "<path>", "size_bytes": <n>}`. Use the returned `path` as the `dossier_storage_path` column value in the UPSERT below, and the rendered `markdown` as `dossier_markdown`. Use `$md$...$md$` dollar quoting for the markdown blob so single quotes and backticks in the dossier don't break the SQL literal.
@@ -467,9 +520,9 @@ Loop to step 2 until `thesis_jobs` queue is empty or the 5-row batch is exhauste
 
 ## Reference data
 
-- Syntactic gate rules: `modal_workers/shared/candidate_gate.py` (v2 is `assess_thesis_v2`). Do not inline-reimplement; call via `public.rpc_assess_thesis` (wraps the same helper on the `assess-thesis` Modal endpoint).
+- Syntactic gate rules: `modal_workers/shared/candidate_gate.py` (v2 is `assess_thesis_v2`). Do not inline-reimplement; call via `public.rpc_assess_thesis(thesis) → bigint request_id` + `public.rpc_compute_collect(request_id, 40000) → jsonb` (two separate `execute_sql` statements; the wrapper POSTs to the `assess-thesis` Modal endpoint).
 - Semantic gate (challenger): separate Claude app routine with adversarial "skeptical IC reviewer" system prompt. Routine name + endpoint managed in the Anthropic console. The ITRK archetype is explicitly named in the challenger's system prompt as the pattern to catch.
-- Dossier renderer: `render_candidate_markdown_v2` from the same module.
+- Dossier renderer: `render_candidate_markdown_v2` from the same module. Call via `public.rpc_render_candidate_markdown(args) → bigint` + `public.rpc_compute_collect`. Pair with `public.rpc_storage_upload(bucket, path, content, content_type) → bigint` + `public.rpc_compute_collect` for the dossier upload.
 - Exemplar (good quality): `unified_system/unified_system/candidates/AXSM_ADA_PDUFA.md`. Study it for tone, depth, tag density, and specificity of asymmetry claims.
 - Anti-pattern (structurally-complete but no asymmetry): `unified_system/unified_system/candidates/rejected_pending_thesis/ITRK_XLON_eqt-possible-offer.md` — DO NOT produce theses of this shape. This is the challenger's canonical `kill` example.
 

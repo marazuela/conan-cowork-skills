@@ -161,14 +161,15 @@ Decision guidance:
 
 Before the regex integrity check (step 6) commits any `new_status='triggered'`, invoke the **challenger routine** — the same adversarial Claude app routine used by `thesis_writer` (step 6.8), but reframed for aging: "is the matched signal load-bearing for this kill condition, or is it a cosmetic pattern hit?"
 
-The challenger receives: the candidate's thesis (`dossier_markdown` + structured `kill_conditions[id=K]`), the full `raw_payload` of the signal being cited as evidence, and the original `observable.search_pattern`. It returns:
+The challenger receives: the candidate's thesis (`dossier_markdown` + structured `kill_conditions[id=K]`), the full `raw_payload` of the signal being cited as evidence, the original `observable.search_pattern`, and `caller_spec_sha` (sha256 of `.claude/skills/thesis_challenger.md` as observed by this skill — `sha256sum .claude/skills/thesis_challenger.md | cut -d' ' -f1`). It returns:
 
 ```json
 {
   "verdict": "confirm" | "challenge" | "kill",
   "reasons": ["string", ...],
   "load_bearing_assessment": "≥80 chars — explains whether the signal concretely satisfies the kill condition's spirit, or merely matches its regex",
-  "strongest_counter": "≥80 chars — strongest argument that this is a false positive"
+  "strongest_counter": "≥80 chars — strongest argument that this is a false positive",
+  "caller_spec_sha": "<echoed verbatim>"
 }
 ```
 
@@ -182,10 +183,10 @@ Checks the challenger MUST run on each `triggered` claim:
 Verdict routing per kill-condition update:
 
 - **`confirm`** → proceed to step 6 (regex integrity check) for final mechanical verification. Two gates must both pass.
-- **`challenge`** → downgrade this specific update to `new_status='pending'` for THIS run. Log to `candidate_aging_failures` with `error_kind='other'` and `error_message='challenger_challenge: <reasons>; evidence may be valid but not load-bearing — re-evaluating tomorrow'`. The next day's run retries with fresh context. No immediate retry within the same session (different from thesis_writer — aging is daily cadence, so "retry tomorrow" IS the retry).
-- **`kill`** → downgrade to `new_status='pending'` AND log `candidate_aging_failures` with `error_kind='other'`, `error_message='challenger_kill_cosmetic: <reasons>'`. If the `recommendation` was `kill` and depended on this update, downgrade to `maintain`, note in `recommendation_reasoning` that the challenger rejected the evidence as cosmetic. Dashboard surfaces via the existing `aging_stuck` flag after 3 consecutive cosmetic rejections.
+- **`challenge`** → downgrade this specific update to `new_status='pending'` for THIS run. Log to `candidate_aging_failures` with `error_kind='challenger_challenge'` and `error_message='<challenger reasons>; evidence may be valid but not load-bearing — re-evaluating tomorrow'`. The next day's run retries with fresh context. No immediate retry within the same session (different from thesis_writer — aging is daily cadence, so "retry tomorrow" IS the retry).
+- **`kill`** → downgrade to `new_status='pending'` AND log `candidate_aging_failures` with `error_kind='challenger_kill_cosmetic'` (or `'challenger_kill_ambiguous'` for entity-mismatch / namesake misfires per check 2 in the challenger spec) and `error_message='<challenger reasons>'`. If the `recommendation` was `kill` and depended on this update, downgrade to `maintain`, note in `recommendation_reasoning` that the challenger rejected the evidence. Dashboard surfaces via the existing `aging_stuck` flag after 3 consecutive cosmetic rejections.
 
-Budget: shares the 15/day Stage B cap from the front-matter. Per candidate with ≥1 proposed `triggered` update, adds 1 challenger call (happy path) or 2 calls (if the Claude evaluator itself was re-run after a kill downgrade changed `recommendation` — rare). Max 2 challenger invocations per candidate per run; beyond that, skip remaining `triggered` claims and log `error_kind='other'`, `error_message='challenger_budget_exhausted'`.
+Budget: shares the 15/day Stage B cap from the front-matter. Per candidate with ≥1 proposed `triggered` update, adds 1 challenger call (happy path) or 2 calls (if the Claude evaluator itself was re-run after a kill downgrade changed `recommendation` — rare). Max 2 challenger invocations per candidate per run; beyond that, skip remaining `triggered` claims and log `error_kind='challenger_budget_exhausted'` (no `error_message` prefix needed; the kind is self-describing).
 
 The challenger's full JSON verdict is preserved in `candidate_aging_failures.routine_output` alongside the original evaluator's output — Pedro's audit trail sees both passes.
 
@@ -197,14 +198,25 @@ For each update in `kill_condition_updates` with `new_status='triggered'`:
 2. Match the claimed `evidence_url` to a signal in the step-4 payload. Fetch that signal's `raw_payload` + `source_url`.
 3. Run the Python regex via `public.rpc_regex_check` (case-insensitive unless the pattern already embeds inline flags in its first 5 chars, e.g. `(?i)`). The RPC POSTs to a Modal endpoint (`modal_workers/app.py::regex_check_endpoint`) that uses Python `re.search` with identical flag-detection to the old bash path. This replaces the `python3 -c ...` shell-out broken by the Cowork Linux sandbox outage of 2026-04-22.
 
-Build the haystack as `json_compact(signal.raw_payload) + ' ' + signal.source_url`, then:
+Build the haystack as `json_compact(signal.raw_payload) + ' ' + signal.source_url`.
+
+**Two-statement pattern.** As of 2026-04-23 every `rpc_*` compute call is split across two `execute_sql` statements — enqueue (returns `bigint` request_id), then collect. The single-call form deadlocks for 60s because of a pg_net in-transaction visibility bug. Never collapse the pair into one statement.
+
+Call 1 — enqueue:
 
 ```
 mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
 SELECT public.rpc_regex_check(
   $pat$<observable.search_pattern>$pat$,
   $hay$<json_compact(signal.raw_payload)> <signal.source_url>$hay$
-) AS result;
+) AS request_id;
+```
+
+Call 2 — collect (separate `execute_sql`):
+
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+SELECT public.rpc_compute_collect(<request_id>, 40000) AS result;
 ```
 
 Response: `{"matched": <bool>, "match": "<first matched substring>" | null}`. Treat `matched=false` as `NO_MATCH`. Use `$pat$...$pat$` and `$hay$...$hay$` dollar quoting so regex metacharacters and signal payload content survive SQL literal parsing.
@@ -251,7 +263,7 @@ If the result is `NO_MATCH` (`matched=false`):
 -- Skip if there's no prior failure row for this candidate (nothing to reset).
 INSERT INTO public.candidate_aging_failures
   (candidate_id, error_kind, error_message, routine_output, consecutive_failures)
-SELECT $candidate_id, 'other', 'streak_reset_after_success', '{}'::jsonb, 0
+SELECT $candidate_id, 'streak_reset', 'streak_reset_after_success', '{}'::jsonb, 0
 WHERE EXISTS (SELECT 1 FROM public.candidate_aging_failures WHERE candidate_id = $candidate_id);
 
 -- And resolve the open operator_flag, if any.
@@ -300,12 +312,29 @@ INSERT INTO public.candidate_events (candidate_id, event_type, payload) VALUES (
   )
 );
 
--- 3. outcomes — only on terminal states.
-INSERT INTO public.outcomes (candidate_id, outcome_type, realized_return, notes)
+-- 3. outcomes — only on terminal states. Set outcome_label inline so
+--    challenger_retro has labeled samples to draw from (it filters on
+--    outcome_label IN (pre_edge_hit, dead_catalyst, post_edge_miss); without
+--    this label set, the retro exits insufficient_sample forever and the
+--    challenger drift-detection loop is dark). Coarse mapping:
+--      killed    → dead_catalyst (kill_condition triggered → thesis wrong)
+--      delivered → pre_edge_hit  (catalyst arrived in window → thesis right)
+--    expired (Stage A aged-out) intentionally stays NULL — we don't know
+--    whether the catalyst missed (post_edge_miss) or never materialized
+--    (dead_catalyst); the post-edge price-decay labeler (Modal, follow-up)
+--    fills those.
+INSERT INTO public.outcomes (
+  candidate_id, outcome_type, realized_return, notes, outcome_label, labeled_at
+)
 SELECT $candidate_id,
        CASE $new_state WHEN 'killed' THEN 'killed' WHEN 'delivered' THEN 'delivered' END,
        NULL,  -- realized_return filled manually by Pedro later
-       $recommendation_reasoning
+       $recommendation_reasoning,
+       CASE $new_state
+         WHEN 'killed'    THEN 'dead_catalyst'::public.emission_outcome_label
+         WHEN 'delivered' THEN 'pre_edge_hit'::public.emission_outcome_label
+       END,
+       now()
 WHERE $new_state IN ('killed', 'delivered');
 
 -- 4. last_aging_evaluated_at goes LAST — this is the "evaluated today" marker that
@@ -329,7 +358,7 @@ Loop to step 3 until the candidate list from step 1 is drained or the quota is h
 - Kill-condition shape: `candidates.kill_conditions` is a JSONB array of `{id, description, observable: {source_type, search_pattern, filing_type?, url_pattern_hint?}, date_bound?, status}`. Status vocabulary: `pending | triggered | cleared`.
 - Recent-signal window: 14d standard, 30d if any signal in the group has `scoring_profile='litigation'` (matches the reactor's `window_days()` rule).
 - convergence_key query pattern: see `modal_workers/shared/rubric_engine.py::convergence_reference()` for the audit-parity reference.
-- Regex matching: `public.rpc_regex_check(pattern, text)` → Modal `regex-check` endpoint → Python `re.search`. Defaults to `re.IGNORECASE` unless the pattern embeds an inline flag group in its first 5 chars (e.g. `(?i)`, `(?im)`, `^(?i)`) — same rule as the old bash path.
+- Regex matching: `public.rpc_regex_check(pattern, text) → bigint request_id` → pair with `public.rpc_compute_collect(request_id, 40000) → jsonb` (two separate `execute_sql` statements). Wraps the `regex-check` Modal endpoint → Python `re.search`. Defaults to `re.IGNORECASE` unless the pattern embeds an inline flag group in its first 5 chars (e.g. `(?i)`, `(?im)`, `^(?i)`) — same rule as the old bash path.
 
 ## Supabase cheatsheet (project_id=xvwvwbnxdsjpnealarkh)
 
