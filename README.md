@@ -8,6 +8,11 @@ Two Claude desktop sessions pull from this repo:
 
 Both machines connect to the same Supabase project (`xvwvwbnxdsjpnealarkh`) via the Supabase MCP with a service-role key held locally on each machine.
 
+## Quick links
+
+- 📊 [AI_TASKS_OVERVIEW.md](AI_TASKS_OVERVIEW.md) — how every AI task intertwines (v2 + v3, data flows, quotas, failure surfaces).
+- 🛠️ [SETUP.md](SETUP.md) — fresh-machine bootstrap for Mac (authoring) and Windows (runner) with per-task smoke tests.
+
 ## Layout
 
 ```
@@ -22,12 +27,16 @@ See [`wrappers/README.md`](wrappers/README.md) for the scheduled-task registrati
 
 | Skill | Trigger | Writes to |
 |---|---|---|
-| `signal_resolver` | Every ~15 min | Resolves unresolved `signals` → entity hints, patches rows |
-| `thesis_writer` | Every ~30 min | Drafts theses for Immediate-band candidates (§7.4), 15/day cap |
+| `signal_resolver` | Every ~10 min | Resolves unresolved `signals` → entity hints, patches rows |
+| `thesis_writer` | Hourly :00 UTC | Drafts theses for Immediate-band candidates (§7.4), 15/day cap |
 | `thesis_challenger` | Post-draft | Runs the challenger pass on a fresh thesis |
-| `candidate_aging` | Daily | Ages `candidates` through the lifecycle states |
-| `coverage_auditor` | Weekly (Sun) | Writes `operator_flags` for recall misses |
-| `challenger_retro` | Weekly | Reviews challenger verdicts for drift |
+| `candidate_aging` | Daily 06:00 UTC | Ages `candidates` through the lifecycle states |
+| `coverage_auditor` | Inside Modal `reporting_weekly` cron (Sun 12:00 UTC) | Writes `operator_flags` for recall misses (NOT a Cowork task) |
+| `challenger_retro` | Weekly Sun 09:00 UTC | Reviews challenger verdicts for drift |
+| `fda_medical_review` / `fda_regulatory_review` / `fda_microstructure_review` | Hourly :15 / :30 / :45 UTC | Drains `fda_agent_reviews` queues; decision-support payloads |
+| `bulk_orchestrator_run` | Daily 09:00 UTC + weekly Mon (v3 Tier 2) | Tier-2 sweep over `fda_assets.watch_priority`; escalates to Tier 1 |
+
+> **v3 Tier-1 sub-agents** (`literature_reviewer`, `regulatory_history`, `competitive_landscape`) live in [`conan-fda-orchestrator-plugin/skills/`](../Conan/conan-fda-orchestrator-plugin/skills/) inside the `marazuela/conan` repo, **not in this repo**. They're Cowork plugin skills with `context: fork` and MCP tool lists — orchestrated from `modal_workers/orchestrator_app.py`, not run as Cowork scheduled tasks. See [AI_TASKS_OVERVIEW.md §3](AI_TASKS_OVERVIEW.md#3-v3-data-flow).
 
 ## Setup — Mac (canonical)
 
