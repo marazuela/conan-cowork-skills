@@ -40,22 +40,27 @@ Read live state via the Supabase MCP (`project_id=xvwvwbnxdsjpnealarkh`):
 
 ```sql
 SELECT a.id AS asset_id, a.ticker, a.drug_name, a.indication,
-       a.watch_priority, a.last_tier2_assessed_at,
+       a.watch_priority,
        (SELECT max(created_at) FROM convergence_assessments
          WHERE asset_id = a.id AND tier = 2 AND superseded_at IS NULL
        ) AS latest_tier2_at
   FROM public.fda_assets a
  WHERE a.is_active = true
    AND a.watch_priority = $1            -- bound from cadence (1 or 2)
-   AND (a.last_tier2_assessed_at IS NULL
-        OR a.last_tier2_assessed_at < now() - $2::interval) -- '20 hours' (priority=1) | '6 days' (priority=2)
+   AND NOT EXISTS (
+         SELECT 1 FROM public.convergence_assessments ca
+          WHERE ca.asset_id   = a.id
+            AND ca.tier       = 2
+            AND ca.superseded_at IS NULL
+            AND ca.created_at >= now() - $2::interval
+       )                                 -- '20 hours' (priority=1) | '6 days' (priority=2)
  ORDER BY a.watch_priority ASC,
-          a.last_tier2_assessed_at ASC NULLS FIRST,
+          latest_tier2_at ASC NULLS FIRST,
           a.ticker ASC
  LIMIT 50;                              -- hard cap = quota; don't over-select
 ```
 
-The `last_tier2_assessed_at < now() - interval` clause prevents the daily sweep from re-running an asset that already got a manual on-demand run earlier in the same UTC day. Use **20 hours** for priority=1 (gives 4-hour grace if the cron drifts) and **6 days** for priority=2.
+The `NOT EXISTS` clause prevents the daily sweep from re-running an asset that already got a fresh non-superseded tier=2 assessment within the cadence window — e.g. from a manual on-demand run earlier in the same UTC day. Use **20 hours** for priority=1 (gives 4-hour grace if the cron drifts) and **6 days** for priority=2. Freshness derives from `convergence_assessments` directly (no per-asset bookkeeping column); the supporting `convergence_assessments_tier_asset_idx` on `(tier, asset_id, created_at DESC) WHERE superseded_at IS NULL` makes the per-asset lookup O(log n).
 
 If zero rows: emit `{processed: 0, reason: 'no priority-N assets due'}` and stop. Do not invoke any compute.
 
@@ -159,22 +164,11 @@ The collect returns one of:
 | `{status: 'failed_validation', errors: [...]}` | The inner skill produced a malformed payload. The orchestrator_runs row is already marked failed by the server. | Log the errors, cite the asset_id + run_id in the run report, do NOT retry inline (this is a skill bug, not a transient fault). Move on. |
 | pg_net transport error / non-200 from collector | Modal endpoint blew up. | Call `tier2_fail(run_id, '<error>')` to reconcile lifecycle, then move on. |
 
-Do NOT retry within a single sweep — failed Tier-2 runs are next-cadence-eligible per the `last_tier2_assessed_at` clause in step 2.
+Do NOT retry within a single sweep — failed Tier-2 runs are next-cadence-eligible per the `NOT EXISTS` clause in step 2 (a failed run never creates a fresh `convergence_assessments` row, so the asset stays due automatically).
 
 ### 7. Bookkeeping
 
-After the per-asset loop:
-
-```sql
--- Stamp last_tier2_assessed_at on every asset that got a completed tier=2
--- assessment in this sweep (NOT on failed/failed_validation; those should
--- re-attempt next cadence).
-UPDATE public.fda_assets
-   SET last_tier2_assessed_at = now()
- WHERE id = ANY($1);  -- only the asset_ids whose run completed
-```
-
-Then emit the sweep summary:
+After the per-asset loop, emit the sweep summary. No per-asset stamp column needed — "last assessed" derives from `convergence_assessments` directly via the `NOT EXISTS` predicate in step 2. Completed runs leave a fresh non-superseded tier=2 row (so the asset is no longer due); failed / failed_validation runs leave no fresh row (so the asset stays due and re-attempts next cadence).
 
 ```json
 {
