@@ -21,13 +21,10 @@ Two roles:
 
 ### Env vars (set persistently)
 
-| Variable                | Purpose                                                  | Default if `CONAN_COWORK_ROOT` set                |
-|-------------------------|----------------------------------------------------------|---------------------------------------------------|
-| `CONAN_ROOT`            | Path to `marazuela/conan` checkout                       | (none — set explicitly)                           |
-| `CONAN_COWORK_ROOT`     | Path to `marazuela/conan-cowork-skills` checkout         | (none — set explicitly)                           |
-| `CONAN_REFERENCE_ROOT`  | v2 reference docs                                        | `${CONAN_COWORK_ROOT}/reference/v2`               |
-| `CONAN_DOSSIERS_ROOT`   | active + archived dossiers                               | `${CONAN_COWORK_ROOT}/dossiers`                   |
-| `CONAN_OUTPUTS_ROOT`    | per-skill output dir (gitignored, mirrors to Storage)    | `${CONAN_COWORK_ROOT}/outputs`                    |
+| Variable                | Purpose                                                  | Required        |
+|-------------------------|----------------------------------------------------------|-----------------|
+| `CONAN_ROOT`            | Path to `marazuela/conan` checkout                       | yes             |
+| `CONAN_COWORK_ROOT`     | Path to `marazuela/conan-cowork-skills` checkout         | yes             |
 
 ### Connections
 
@@ -102,8 +99,8 @@ modal secret create scanner-secrets ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 
 ```bash
 # 6. Validate setup
-python3 "$CONAN_COWORK_ROOT/skills_v2/_meta/path_validation.py"
-# Exit 0 = ready. Confirms 4 roots resolve + every required reference file + 13 v2 bundles.
+test -L .claude/skills && readlink .claude/skills | grep -q "conan-cowork-skills/skills$" && echo "skills symlink OK" || echo "skills symlink BROKEN"
+test -n "${CONAN_ROOT:-}" -a -d "$CONAN_ROOT" && echo "CONAN_ROOT OK" || echo "CONAN_ROOT BROKEN"
 ```
 
 ---
@@ -137,7 +134,8 @@ mklink /D "%APPDATA%\Claude\skills" "C:\Users\JGoror\conan-cowork-skills\skills"
 
 ```powershell
 # 4. Validate
-python "%CONAN_COWORK_ROOT%\skills_v2\_meta\path_validation.py"
+if (Test-Path "$env:APPDATA\Claude\skills") { "skills symlink OK" } else { "skills symlink BROKEN" }
+if (Test-Path "$env:CONAN_ROOT")             { "CONAN_ROOT OK" }     else { "CONAN_ROOT BROKEN" }
 ```
 
 ### Cowork scheduled tasks on the runner
@@ -310,7 +308,6 @@ LIMIT 5;
 | Symptom                                                 | Likely cause                                                        | Fix                                                                                  |
 |---------------------------------------------------------|---------------------------------------------------------------------|--------------------------------------------------------------------------------------|
 | Cowork: "skill X not found"                             | Symlink broken or skills dir not registered                         | `ls -la .claude/skills` — re-create the symlink; restart Claude Desktop              |
-| `path_validation.py` fails on `CONAN_REFERENCE_ROOT`    | Env var not exported in the shell Cowork inherits                   | Restart the Claude Desktop process after editing rc files                            |
 | skill says `cd "$CONAN_ROOT"` then errors               | `CONAN_ROOT` unset on the runner                                    | `setx CONAN_ROOT ...` (Win) or `export CONAN_ROOT=...` (Mac), then restart Claude    |
 | Stream 2 logs `[auto-fallback]` on every run            | `anthropic-orchestrator` secret not created                         | `modal secret create anthropic-orchestrator ANTHROPIC_API_KEY=...`                   |
 | `failed_reactor_events` filling up, `payload->>'source' = 'signal_resolver'` | Reactor preflight failing on rescore         | Check `modal_workers/shared/rubric_engine.py` and the Modal RPC URL                  |

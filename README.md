@@ -16,48 +16,36 @@ Both machines connect to the same Supabase project (`xvwvwbnxdsjpnealarkh`) via 
 ## Layout
 
 ```
-skills/         # v1 Claude skill definitions (queue-drain pipeline; being retired)
-skills_v2/      # v2 skill bundles (analyst toolkit; methodology + Python helpers)
-  _shared/      # cross-skill helpers (env_resolver, storage_sync)
-  _meta/        # acceptance gates (path_validation.py)
-  <13 skills>/  # SKILL.md + helpers/ + outputs/ per bundle
-wrappers/       # v1 Cowork scheduled-task prompts (being retired)
-wrappers_v2/    # v2 wrappers (u4_kill_sweep, m1_m2_m3_weekly, analyze_on_demand, p6_takeover_discovery)
-reference/      # v1 docs the skills cite (spec.md, CONAN_SCORING_METHOD.md)
-reference/v2/   # v2 reference content (framework/, training/, docs/, strategies/, health/)
-dossiers/       # active + archived candidate dossiers (v2 source of truth)
-outputs/        # per-skill output dir (gitignored; mirrors to Supabase Storage)
+skills/                              # Cowork skills loaded by Claude desktop
+  *.md                               # one .md per simple skill (signal_resolver,
+                                     # thesis_writer, candidate_aging, etc.)
+  assess-fda-binary-catalyst/        # FDA single-shot Opus skill (bundle: SKILL.md + outputs/)
+  analyze-fda-approval-prospects/    # FDA P1 sub-skill (trial forensics, AdCom/label/CMC risk)
+  compare-to-historical-precedents/  # FDA U3 sub-skill (K-NN over historical FDA outcomes)
+wrappers/       # Paste-ready Cowork scheduled-task prompts (legacy — see note below)
+schemas/        # JSON schemas referenced by skills + Modal orchestrator stages
+reference/      # Docs the skills cite at runtime (spec.md, CONAN_SCORING_METHOD.md)
+archive/        # Retired content (pre-FDA-pivot skills_v2 bundles, v1↔v2 design docs)
 ```
 
-See [`wrappers/README.md`](wrappers/README.md) for v1 scheduled-task patterns. See `wrappers_v2/README.md` (forthcoming) for v2.
+The bundled FDA skills (`assess-fda-binary-catalyst`, `analyze-fda-approval-prospects`,
+`compare-to-historical-precedents`) live as `<dir>/SKILL.md` because they ship with
+helper Python + per-case output trees. The flat `.md` skills are loaded directly by
+the Cowork skill discovery in `.claude/skills/*.md`.
 
-## v2 environment variables
+## Wrappers — legacy paste-target
 
-v2 skills resolve all paths via `skills_v2/_shared/env_resolver.py`. Set these once on each runner machine; defaults work if `CONAN_COWORK_ROOT` is set:
+The 10 files in [`wrappers/`](wrappers/README.md) are the prompt text that was originally
+pasted into Cowork's scheduled-task UI on each runner machine. They are still load-bearing
+for the original 5 + FDA-review tasks (`signal_resolver`, `thesis_writer`, `candidate_aging`,
+`coverage_auditor`, `challenger_retro`, `fda_*_review`).
 
-| Env var | Purpose | Default |
-|---|---|---|
-| `CONAN_COWORK_ROOT` | base of this repo checkout | (none — set explicitly) |
-| `CONAN_REFERENCE_ROOT` | reference content | `${CONAN_COWORK_ROOT}/reference/v2` |
-| `CONAN_DOSSIERS_ROOT` | active + archived dossiers | `${CONAN_COWORK_ROOT}/dossiers` |
-| `CONAN_OUTPUTS_ROOT` | per-skill output dir (gitignored) | `${CONAN_COWORK_ROOT}/outputs` |
-
-Mac (zsh):
-```bash
-echo 'export CONAN_COWORK_ROOT=/Users/Pico/Documents/Claude/Projects/conan-cowork-skills' >> ~/.zshrc
-```
-
-Windows (PowerShell):
-```powershell
-setx CONAN_COWORK_ROOT "C:\Users\<you>\conan-cowork-skills"
-```
-
-Verify with:
-```bash
-python3 skills_v2/_meta/path_validation.py
-```
-
-The validator confirms all four roots resolve, every required reference file exists (Phase 0c porting checklist), and all 13 v2 skill bundles are present. Exit 0 = ready.
+**New skills since 2026-05 do NOT get a wrapper file.** The current pattern is to register
+the scheduled task with a one-line `Initial prompt` like
+`Run the X skill. Process up to N this tick.` (see
+[OPUS_SKILLS_MIGRATION.md §2b](OPUS_SKILLS_MIGRATION.md) for `asset_linker_backfill` and
+`fact_extractor_opus`). The skill file itself carries the methodology — the wrapper is
+optional context.
 
 ## What each skill does
 
@@ -65,12 +53,20 @@ The validator confirms all four roots resolve, every required reference file exi
 |---|---|---|
 | `signal_resolver` | Every ~10 min | Resolves unresolved `signals` → entity hints, patches rows |
 | `thesis_writer` | Hourly :00 UTC | Drafts theses for Immediate-band candidates (§7.4), 15/day cap |
-| `thesis_challenger` | Post-draft | Runs the challenger pass on a fresh thesis |
+| `thesis_challenger` | Post-draft (chained from thesis_writer) | Runs the challenger pass on a fresh thesis |
 | `candidate_aging` | Daily 06:00 UTC | Ages `candidates` through the lifecycle states |
 | `coverage_auditor` | Inside Modal `reporting_weekly` cron (Sun 12:00 UTC) | Writes `operator_flags` for recall misses (NOT a Cowork task) |
 | `challenger_retro` | Weekly Sun 09:00 UTC | Reviews challenger verdicts for drift |
 | `fda_medical_review` / `fda_regulatory_review` / `fda_microstructure_review` | Hourly :15 / :30 / :45 UTC | Drains `fda_agent_reviews` queues; decision-support payloads |
+| `fda_aging_review` | Daily 06:00 UTC | Stage-B aging review for FDA assets (v3 aging methodology port) |
+| `fda_challenger_replay` | Weekly Sun 09:00 UTC | Stratified challenger replay of FDA assessments for drift detection |
 | `bulk_orchestrator_run` | Daily 09:00 UTC + weekly Mon (v3 Tier 2) | Tier-2 sweep over `fda_assets.watch_priority`; escalates to Tier 1 |
+| `asset_linker_backfill` | Cowork :00,:30 hourly | Drains `documents` lacking asset linkage; replaces Modal `v3-asset-linker-pass1` (see [OPUS_SKILLS_MIGRATION.md](OPUS_SKILLS_MIGRATION.md)) |
+| `fact_extractor_opus` | Cowork :15 hourly | Extracts facts from material `asset_documents`; replaces Modal `v3-fact-extractor` |
+| `skill_eval_replay` | On-demand only | 271-case backtest driver — invokes `assess-fda-binary-catalyst` against `eval_harness`, scores vs. live orchestrator (no live writes) |
+| `assess-fda-binary-catalyst` | Invoked by `skill_eval_replay` (or operator one-off) | Single-shot Opus FDA convergence assessment; calls P1+U3 sub-skills by default |
+| `analyze-fda-approval-prospects` | Invoked as P1 sub-skill from `assess-fda-binary-catalyst` | Trial forensics, AdCom risk, label risk, CMC risk, probability range |
+| `compare-to-historical-precedents` | Invoked as U3 sub-skill from `assess-fda-binary-catalyst` | K-NN over historical FDA outcomes; reference-class base rates |
 
 > **v3 Tier-1 sub-agents** (`literature_reviewer`, `regulatory_history`, `competitive_landscape`) live in [`conan-fda-orchestrator-plugin/skills/`](../Conan/conan-fda-orchestrator-plugin/skills/) inside the `marazuela/conan` repo, **not in this repo**. They're Cowork plugin skills with `context: fork` and MCP tool lists — orchestrated from `modal_workers/orchestrator_app.py`, not run as Cowork scheduled tasks. See [AI_TASKS_OVERVIEW.md §3](AI_TASKS_OVERVIEW.md#3-v3-data-flow).
 
