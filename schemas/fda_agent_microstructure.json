@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/fda_agent_microstructure.json",
+  "title": "FDA Microstructure Agent Output",
+  "description": "Structured JSON the microstructure specialist agent emits for one fda_regulatory_events row. Validated by modal_workers/shared/fda_agent_validator.py before any DB write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "options_liquidity_score",
+    "implied_move_pct",
+    "crowding_score",
+    "event_window_open_interest",
+    "citations",
+    "confidence"
+  ],
+  "properties": {
+    "options_liquidity_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "Agent's 0..5 read on options liquidity at the event window. Used by compose_features ONLY when Polygon's score is null."
+    },
+    "implied_move_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 200,
+      "description": "Agent's straddle-implied move estimate. Used ONLY when Polygon straddle is unavailable. Negative is invalid (move magnitudes are non-negative)."
+    },
+    "borrow_cost_bps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 50000,
+      "description": "Borrow cost in basis points (informational; not folded into score). Null when not available."
+    },
+    "crowding_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "0..5: short interest, 13F overlap, sell-side pile-on. 5=very crowded."
+    },
+    "event_window_open_interest": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total open interest summed across contracts expiring in the event window."
+    },
+    "insufficient_signal": {
+      "type": "boolean",
+      "default": false
+    },
+    "citations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "quote"],
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "quote": { "type": "string", "minLength": 4 },
+          "evidence_id": { "type": "string" }
+        }
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "version": {
+      "type": "string"
+    }
+  }
+}

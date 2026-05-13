@@ -11,3 +11,6 @@ credentials*.json
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# v2 outputs are local-FS-only; finalized artifacts mirror to Supabase Storage
+outputs/

@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/competitive_landscape_v1.json",
+  "title": "Competitive Landscape Sub-Agent Output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "asset_id",
+    "competitors",
+    "moat_summary",
+    "retrieved_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "asset_id": { "type": "string", "format": "uuid" },
+    "competitors": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "pipeline_stage", "mechanism"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "ticker": { "type": ["string", "null"] },
+          "pipeline_stage": {
+            "type": "string",
+            "enum": ["preclinical", "phase1", "phase2", "phase3", "filed", "approved", "discontinued", "unknown"]
+          },
+          "mechanism": { "type": "string", "minLength": 1 },
+          "indication": { "type": ["string", "null"] },
+          "differentiators": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "maxItems": 10
+          },
+          "threats_to_thesis": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "maxItems": 10
+          },
+          "primary_source_urls": {
+            "type": "array",
+            "items": { "type": "string", "format": "uri" },
+            "minItems": 1,
+            "maxItems": 5
+          },
+          "fact_citations": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "moat_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assessment", "key_factors"],
+      "properties": {
+        "assessment": {
+          "type": "string",
+          "enum": ["strong_moat", "moderate_moat", "weak_moat", "no_moat", "first_mover_only"]
+        },
+        "key_factors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "maxItems": 10
+        },
+        "summary": { "type": "string" }
+      }
+    },
+    "retrieved_at": { "type": "string", "format": "date-time" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "partial_output": { "type": "boolean", "default": false }
+  }
+}

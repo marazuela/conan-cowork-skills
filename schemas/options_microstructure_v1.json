@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/options_microstructure_v1.json",
+  "title": "Options Microstructure Sub-Agent Output (v1)",
+  "description": "Pre-event options chain analysis. Reads from polygon_mcp; computes straddle-implied move, IV term structure, OI concentration. Used by Stage 1 to triangulate market-implied catalyst magnitude.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "asset_id",
+    "ticker",
+    "computed_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "asset_id": { "type": "string", "format": "uuid" },
+    "ticker": { "type": "string", "minLength": 1 },
+    "underlying_price": { "type": ["number", "null"], "minimum": 0 },
+    "event_date": {
+      "type": ["string", "null"],
+      "format": "date",
+      "description": "PDUFA / AdComm date the analysis is anchored to."
+    },
+    "straddle_implied_move_pct": {
+      "type": ["number", "null"],
+      "description": "ATM straddle as % of underlying. null if chain unavailable."
+    },
+    "iv_30d": { "type": ["number", "null"], "minimum": 0 },
+    "iv_60d": { "type": ["number", "null"], "minimum": 0 },
+    "iv_term_slope": {
+      "type": ["string", "null"],
+      "enum": [null, "front_loaded", "flat", "backward_loaded"]
+    },
+    "event_window_liquidity_score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "0=untradable, 5=deep two-sided market across ±20% strikes."
+    },
+    "oi_concentration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "top_strikes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["strike", "side", "open_interest"],
+            "properties": {
+              "strike": { "type": "number" },
+              "side": { "type": "string", "enum": ["call", "put"] },
+              "open_interest": { "type": "integer", "minimum": 0 },
+              "volume_today": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          },
+          "maxItems": 20
+        },
+        "put_call_ratio": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "position_inferred": {
+      "type": "string",
+      "enum": ["long_vol", "short_vol", "directional_long", "directional_short", "neutral", "unknown"]
+    },
+    "computed_at": { "type": "string", "format": "date-time" },
+    "data_quality": {
+      "type": "string",
+      "enum": ["fresh", "stale", "unavailable"],
+      "description": "fresh = chain pulled within last 15min; stale = older; unavailable = source returned no data."
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "partial_output": { "type": "boolean", "default": false }
+  }
+}

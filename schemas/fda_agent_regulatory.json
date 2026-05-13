@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/fda_agent_regulatory.json",
+  "title": "FDA Regulatory Agent Output",
+  "description": "Structured JSON the regulatory specialist agent emits for one fda_regulatory_events row. Validated by modal_workers/shared/fda_agent_validator.py before any DB write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adcom_risk_score",
+    "crl_precedent",
+    "resubmission_pathway",
+    "staff_review_redflags",
+    "evidence_confidence_boost",
+    "regulatory_confidence",
+    "citations",
+    "confidence"
+  ],
+  "properties": {
+    "adcom_risk_score": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "1=low risk (no AdCom planned, or AdCom historically aligned with sponsor) ... 5=high risk (split AdCom on similar drugs, vocal critics on panel)."
+    },
+    "crl_precedent": {
+      "type": "boolean",
+      "description": "Has the FDA issued a CRL on this drug or a closely-related precursor?"
+    },
+    "resubmission_pathway": {
+      "type": "string",
+      "enum": ["smooth", "difficult", "unlikely", "n/a"],
+      "description": "If a CRL did or could occur, agent's read on resubmission viability."
+    },
+    "staff_review_redflags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 20,
+      "description": "Short phrases summarizing concerns surfaced in FDA briefing books, AdCom transcripts, or Federal Register notices."
+    },
+    "evidence_confidence_boost": {
+      "type": "number",
+      "minimum": -0.40,
+      "maximum": 0.40,
+      "description": "Signed additive boost to evidence_confidence. Bounded ±0.40 by the validator."
+    },
+    "regulatory_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Agent's self-assessed confidence in the regulatory analysis itself."
+    },
+    "insufficient_signal": {
+      "type": "boolean",
+      "default": false
+    },
+    "citations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "quote"],
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "quote": { "type": "string", "minLength": 4 },
+          "evidence_id": { "type": "string" }
+        }
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "version": {
+      "type": "string"
+    }
+  }
+}

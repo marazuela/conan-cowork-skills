@@ -1,0 +1,34 @@
+"""Atomic file writer (temp + rename) per D-052 / feedback_edit_tool_null_padding.md.
+
+Usage:
+    from atomic_write import atomic_write_text, atomic_write_json
+    atomic_write_text(path, "...")
+    atomic_write_json(path, {"k": "v"})
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+def atomic_write_text(path: str | Path, content: str, encoding: str = "utf-8") -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_json(path: str | Path, obj: Any, indent: int = 2) -> None:
+    atomic_write_text(path, json.dumps(obj, indent=indent, default=str, ensure_ascii=False))

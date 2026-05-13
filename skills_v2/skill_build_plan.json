@@ -1,0 +1,386 @@
+{
+  "version": "1.0",
+  "ratified_at": "2026-04-29T00:00:00Z",
+  "ratified_by": "Pedro",
+  "anti_drift_lock": "Plan is immutable post-ratification. Scheduled tasks NEVER modify this file. Skills may be added in future versions but not removed.",
+  "scope": {
+    "in_scope_scanners": [
+      "edgar_filing_monitor",
+      "fda_pdufa_pipeline",
+      "lse_rns_scanner",
+      "tdnet_scanner",
+      "asx_scanner",
+      "hkex_scanner",
+      "kind_scanner",
+      "bse_nse_scanner",
+      "cvm_scanner",
+      "courtlistener_scanner",
+      "sec_enforcement_scanner",
+      "takeover_candidate_scanner",
+      "pre_phase3_readout_scanner"
+    ],
+    "in_scope_profiles": ["merger_arb", "activist_governance", "binary_catalyst", "litigation", "insider"],
+    "out_of_scope": ["short_positioning"]
+  },
+  "global_constraints": {
+    "working_folder": "C:\\Users\\javie\\OneDrive\\Desktop\\Claude Cowork\\Investment tool backup skills",
+    "reference_folder_read_only": "C:\\Users\\javie\\OneDrive\\Desktop\\Claude Cowork\\Investment tool backup",
+    "atomic_writes_required": true,
+    "confidence_field_required": true,
+    "primary_source_field_required": true,
+    "skill_md_must_include": ["frontmatter (name, description, type)", "required inputs and outputs", "step-by-step methodology", "primary source list", "confidence scoring rules", "output schema", "at least one worked example"]
+  },
+  "skills": [
+    {
+      "id": "U1",
+      "name": "analyze-candidate-financials",
+      "phase": 1,
+      "phase_order": 1,
+      "profile_scope": "universal",
+      "description": "Comprehensive financial assessment for any candidate. Profile-aware application of balance sheet quality, cash flow forensics, Sloan accruals, hidden value, and capital allocation review.",
+      "methodology_summary": "Universal layer: balance sheet quality (working capital, cash, debt structure, leverage), cash flow quality (OCF vs NI, FCF trend, cash conversion), Sloan accruals analysis (operating accruals as % of avg total assets), revenue recognition tells (DSO trend, deferred revenue, segment consistency), capital allocation track record (5-10y buyback ROIC, M&A returns, dividend coverage), hidden value scan (real estate carrying vs market, IP/intangibles, deferred tax assets, unconsolidated affiliates, OBS exposure including operating lease/JV/VIE). Profile-specific application: merger_arb (target balance sheet survivability under MAC, acquirer financing capacity, transaction multiples vs comps); activist (capital allocation forensics, margin profile vs peers, hidden assets supporting breakup thesis, sum-of-the-parts); binary_catalyst (cash runway through catalyst date, dilution risk if catalyst slips, partnership economics); insider (executive comp alignment, buyback discipline at insider purchase prices); litigation (balance sheet capacity to absorb damages, insurance coverage).",
+      "required_inputs": ["ticker", "cik", "profile"],
+      "required_outputs": ["skills/analyze-candidate-financials/outputs/<ticker>_financial_assessment.md", "skills/analyze-candidate-financials/outputs/<ticker>_metrics.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/profile_merger_arb.md",
+        "Investment tool backup/02_System/engine/framework/profile_activist_governance.md",
+        "Investment tool backup/02_System/engine/framework/profile_binary_catalyst.md",
+        "Investment tool backup/02_System/engine/framework/candidate_template.md",
+        "Investment tool backup/01_Opportunities/active/RPAY/dossier.md"
+      ],
+      "primary_sources": ["SEC EDGAR 10-K", "SEC EDGAR 10-Q", "yfinance prices and multiples", "Local exchange filings for international candidates"],
+      "test_candidate": {
+        "ticker": "RPAY",
+        "context": "Active activist + merger arb dual-profile dossier",
+        "expected_output_features": ["Sloan accruals computed", "Hidden value scan", "MAC vulnerability assessment", "Capital allocation 5y review"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "sloan_accruals.py (operating accruals as % avg TA), capital_allocation_scorecard.py (5y buyback/M&A/dividend ROIC), hidden_value_scanner.py (real estate, IP, deferred tax, unconsolidated affiliates extraction)",
+      "dependencies": [],
+      "estimated_complexity": "high"
+    },
+    {
+      "id": "U2",
+      "name": "compose-thesis-with-discipline",
+      "phase": 1,
+      "phase_order": 2,
+      "profile_scope": "universal",
+      "description": "Disciplined thesis composer. Refuses to output without all six fields populated and defended: variant perception, preconditions, kill criteria, expected return distribution, time horizon, sizing inputs.",
+      "methodology_summary": "Six required fields: (1) Variant perception — one sentence stating what we believe that consensus does not. (2) Preconditions — what must be true for the thesis to play out. (3) Kill criteria — specific ex-ante evidence that would force exit. (4) Expected return distribution — probability-weighted scenario tree (base/bull/bear with explicit probabilities), not point estimate. (5) Time horizon with milestone dates. (6) Sizing inputs — conviction grade, asymmetry score, correlation with existing book. The skill consumes outputs from U1 (financials), and any relevant counterparty research skill (P3/P4/P5/P6), and any direct analysis skill (P1/P2). It synthesizes these into a thesis document that follows the dossier.md frontmatter shape used in 01_Opportunities/active/. Refuses to output if any of the six fields is empty or unjustified.",
+      "required_inputs": ["candidate_id", "profile", "supporting_skill_outputs (paths)"],
+      "required_outputs": ["skills/compose-thesis-with-discipline/outputs/<candidate>_thesis.md"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/candidate_template.md",
+        "Investment tool backup/02_System/engine/framework/profile_adjustments.md",
+        "Investment tool backup/01_Opportunities/active/AXSM/dossier.md",
+        "Investment tool backup/01_Opportunities/active/RPAY/dossier.md",
+        "Investment tool backup/02_System/engine/docs/INSTRUCTIONS.md"
+      ],
+      "primary_sources": ["Candidate dossier", "Skill outputs from U1, P1-P6 as applicable"],
+      "test_candidate": {
+        "ticker": "AXSM",
+        "context": "Binary catalyst PDUFA — clear catalyst date, well-defined kill conditions",
+        "expected_output_features": ["All six fields populated", "Probability-weighted scenarios with explicit %", "Kill criteria are specific events not vague conditions", "Sizing input grounded in U1 output"]
+      },
+      "helper_scripts_needed": false,
+      "helper_scripts_description": "",
+      "dependencies": ["U1"],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": "U4",
+      "name": "monitor-kill-conditions",
+      "phase": 1,
+      "phase_order": 3,
+      "profile_scope": "universal",
+      "description": "Daily sweep across all active dossiers. Profile-aware kill triggers. Auto-archive when conditions met.",
+      "methodology_summary": "Iterates every dossier in 01_Opportunities/active/ (read from working folder mirror), reads frontmatter for profile and stated kill conditions, applies profile-specific checks: merger_arb (8-K close, withdrawal, spread <5%); activist (annual meeting passed, 13D/A withdrawal, settlement announce); binary_catalyst (FDA decision issued, AdCom convened); litigation (judgment, settlement, dismissal); insider (price target, time horizon expiry). For each triggered kill condition, writes archive note with reason, timestamp, and source URL; moves dossier to delivered_recent/ or candidates_archive/ as appropriate. Outputs daily summary of actions taken.",
+      "required_inputs": ["scope (all_active | specific_dossier)"],
+      "required_outputs": ["skills/monitor-kill-conditions/outputs/<date>_kill_sweep.md", "skills/monitor-kill-conditions/outputs/<date>_actions.jsonl"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/docs/INSTRUCTIONS.md",
+        "Investment tool backup/02_System/engine/framework/profile_adjustments.md",
+        "Investment tool backup/01_Opportunities/active/AXSM/dossier.md",
+        "Investment tool backup/01_Opportunities/active/RPAY/dossier.md",
+        "Investment tool backup/01_Opportunities/active/PTSB/dossier.md"
+      ],
+      "primary_sources": ["SEC EDGAR (8-K)", "FDA decision lists", "Court dockets via CourtListener", "Local exchange filings"],
+      "test_candidate": {
+        "ticker": "ALL_ACTIVE",
+        "context": "Run sweep across all 8 active dossiers; expect at most 1-2 kill triggers given active book is fresh",
+        "expected_output_features": ["Each dossier processed with status", "Triggered kills include reason + source URL", "No false positives on dossiers without kill triggers"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "sweep_active_dossiers.py (iterate active/ folder, read frontmatter, dispatch profile-specific checker), kill_checks_<profile>.py (one per profile)",
+      "dependencies": [],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": "P1",
+      "name": "analyze-fda-approval-prospects",
+      "phase": 1,
+      "phase_order": 4,
+      "profile_scope": "binary_catalyst",
+      "description": "Trial data forensics + AdCom risk + label risk + CMC risk synthesized to approval probability. Two modes: evaluative (PDUFA imminent) and forward-looking (Phase 3 readout approaching).",
+      "methodology_summary": "Trial data forensics: efficacy data quality (primary endpoint achievement vs pre-specified threshold, p-values, magnitude vs comparator, NNT, durability), safety profile (TEAEs, SAEs, deaths, dropout patterns, dose-related signals), comparator landscape and unmet need quantification, statistical analysis plan integrity (alpha allocation, multiple comparison adjustment, hierarchical testing, pre-specified vs post-hoc, interim analysis adaptive risk), population (ITT vs mITT vs PP — and which the FDA cares about for this indication), trial design tells (sample size relative to expected effect, recruitment timeline, dropout rate, geographic distribution, prior failed trials). Calls P2 (research-clinical-class-precedent) for FDA precedent matching. AdCom risk: does this division typically convene one for this indication, historical base rate. Label risk: boxed warning likelihood, REMS, indication restriction, post-marketing requirements. CMC/manufacturing risk: Form FDA-483 history, recent warning letters, facility inspection cadence. Forward-looking mode: same forensic but applied to expected readout, projecting success/failure scenarios. Output: probability range with confidence interval and assumption ledger.",
+      "required_inputs": ["drug_name", "indication", "company_ticker", "catalyst_date_or_expected_window", "mode (evaluative | forward_looking)"],
+      "required_outputs": ["skills/analyze-fda-approval-prospects/outputs/<drug>_approval_analysis.md", "skills/analyze-fda-approval-prospects/outputs/<drug>_probability_estimate.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/profile_binary_catalyst.md",
+        "Investment tool backup/01_Opportunities/active/AXSM/dossier.md",
+        "Investment tool backup/01_Opportunities/active/VERA/dossier.md",
+        "Investment tool backup/01_Opportunities/active/VRDN/dossier.md",
+        "Investment tool backup/01_Opportunities/delivered_recent/TVTX_FSGS_PDUFA_APPROVED_2026-04-13.md"
+      ],
+      "primary_sources": ["ClinicalTrials.gov", "PubMed", "ChEMBL", "bioRxiv preprints", "FDA approvals database", "FDA AdCom calendar", "FDA inspection database"],
+      "test_candidate": {
+        "ticker": "AXSM",
+        "drug": "AXS-05 (Auvelity) for ADA",
+        "mode": "evaluative",
+        "context": "Active PDUFA candidate; verify analysis matches active dossier assumptions",
+        "expected_output_features": ["Probability range with explicit reasoning", "Trial design forensic findings", "Class precedent integration", "AdCom risk assessment"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "fetch_trial_data.py (ClinicalTrials.gov API), endpoint_integrity_check.py (statistical analysis plan tells), adcom_history_lookup.py (FDA AdCom database)",
+      "dependencies": ["P2"],
+      "estimated_complexity": "high"
+    },
+    {
+      "id": "P2",
+      "name": "research-clinical-class-precedent",
+      "phase": 1,
+      "phase_order": 5,
+      "profile_scope": "binary_catalyst",
+      "description": "FDA decisions for drugs in same class. Approval rate, CRL grounds, AdCom outcomes, label patterns. Plus this company's prior FDA interactions.",
+      "methodology_summary": "Class precedent: identify mechanism of action, indication, and FDA review division. Pull all approved drugs in same class (last 10y), all rejected (CRL) drugs in same class, all withdrawn applications. For each, capture: indication (exact vs expanded), label (boxed warning, REMS, indication restriction, post-marketing requirement), AdCom convened (yes/no, vote breakdown), review division, time-from-NDA-to-decision, accelerated/breakthrough/RTOR/priority status. Compute base rates: approval probability for this class, AdCom probability, boxed warning probability. Company-specific FDA history: prior CRLs, prior approvals, RTOR participation, breakthrough designations, ongoing inspections.",
+      "required_inputs": ["mechanism_of_action", "indication", "company_ticker"],
+      "required_outputs": ["skills/research-clinical-class-precedent/outputs/<drug>_class_precedent.md", "skills/research-clinical-class-precedent/outputs/<drug>_class_basrates.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/profile_binary_catalyst.md",
+        "Investment tool backup/02_System/engine/signals/strategies/us_fda_pdufa.md"
+      ],
+      "primary_sources": ["FDA approvals database", "FDA CRL database (where public)", "AdCom history", "ChEMBL drug-target", "PubMed drug-class reviews", "EDGAR for company FDA disclosures"],
+      "test_candidate": {
+        "drug": "AXS-05",
+        "moa": "NMDA receptor antagonist + CYP2D6 inhibitor",
+        "indication": "Major Depressive Disorder",
+        "expected_output_features": ["Class approval rate computed", "Prior approvals listed with labels", "AdCom rate for this division", "Axsome's prior FDA history"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "fda_class_lookup.py (FDA approvals API + filter by MoA/class), adcom_class_history.py, company_fda_history.py (EDGAR-based)",
+      "dependencies": [],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": "P3",
+      "name": "research-activist-filer",
+      "phase": 2,
+      "phase_order": 6,
+      "profile_scope": "activist_governance",
+      "description": "Counterparty intelligence for activist signals. Prior 13D filings, target outcomes, average position size, holding period, success rate, escalation patterns.",
+      "methodology_summary": "Input: filer name or CIK. Pull all prior 13D filings (vs 13G passive) from EDGAR full-text search. For each prior campaign: target ticker, filing date, position size at filing, position size evolution (subsequent 13D/A amendments), known outcome (proxy fight won/lost, sale, settlement, withdrawal, still active), holding period to outcome, return generated. Compute: total prior 13D campaigns, success rate (ratio of governance change or premium realization), average position size, average holding period, sector concentration. Compare to tier-1 activist benchmarks (Elliott, Icahn, Starboard, ValueAct). Detect escalation patterns: rate of 13D/A amendments, language intensification, board nomination filings. Has international extensions: UK (FCA disclosures), JP (METI 5%-rule filings), EU (transparency directive).",
+      "required_inputs": ["filer_name_or_cik", "current_target_ticker"],
+      "required_outputs": ["skills/research-activist-filer/outputs/<filer>_track_record.md", "skills/research-activist-filer/outputs/<filer>_campaigns.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/profile_activist_governance.md",
+        "Investment tool backup/01_Opportunities/active/RPAY/dossier.md",
+        "Investment tool backup/01_Opportunities/active/RGR/dossier.md",
+        "Investment tool backup/01_Opportunities/active/6027/dossier.md"
+      ],
+      "primary_sources": ["SEC EDGAR full-text search (13D, 13D/A, 13G, DEF 14A, PRRN14A)", "DOJ/FTC merger announcements (for outcome verification)", "Local exchange filings for international filers"],
+      "test_candidate": {
+        "filer": "Forager Capital Management",
+        "current_target": "RPAY",
+        "context": "Active RPAY dossier explicitly notes Forager track record needs verification",
+        "expected_output_features": ["All prior 13D filings listed", "Outcome per campaign with source URL", "Success rate computed", "Comparison to tier-1 activists"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "edgar_filer_history.py (full-text 13D search by CIK or name), campaign_outcome_resolver.py (links 13D to subsequent governance/M&A events), tier1_benchmark_data.py (Elliott/Icahn/Starboard reference)",
+      "dependencies": [],
+      "estimated_complexity": "high"
+    },
+    {
+      "id": "P4",
+      "name": "research-acquirer-history",
+      "phase": 2,
+      "phase_order": 7,
+      "profile_scope": "merger_arb",
+      "description": "Counterparty intelligence for merger_arb signals. Acquirer's M&A track record, regulatory outcomes by jurisdiction, financing approach, MAC invocation history.",
+      "methodology_summary": "Input: acquirer name or CIK. Pull all prior M&A deals from EDGAR (DEFM14A, S-4, SC TO, 8-K M&A announcements) and regulatory press releases (DOJ/FTC, CMA UK, EC EU, MOFCOM China). For each prior deal: target, deal value, announcement date, close/withdrawal date, regulatory outcome (cleared/blocked/withdrawn/conditional), financing approach (cash/stock/hybrid/debt), MAC invocation if applicable, time-to-close, post-close performance. Compute: prior deal count, success rate (closed vs withdrawn), regulatory outcomes by jurisdiction, average time-to-close, average premium paid, MAC invocation rate. Jurisdiction-specific extensions: UK Takeover Panel (mandatory bid threshold, scheme vs offer), JP (METI guidelines for foreign acquirers), AU (FIRB approval), HK (SFC takeover code), KR (FSC), IN (SEBI takeover regs), BR (CADE).",
+      "required_inputs": ["acquirer_name_or_cik", "current_target_ticker", "deal_jurisdiction"],
+      "required_outputs": ["skills/research-acquirer-history/outputs/<acquirer>_ma_history.md", "skills/research-acquirer-history/outputs/<acquirer>_deals.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/profile_merger_arb.md",
+        "Investment tool backup/01_Opportunities/active/PTSB/dossier.md",
+        "Investment tool backup/01_Opportunities/active/LKQ/dossier.md"
+      ],
+      "primary_sources": ["SEC EDGAR M&A filings", "DOJ/FTC merger reviews", "CMA / EC / MOFCOM / FIRB / SFC / FSC / SEBI / CADE press releases", "Definitive merger agreements (for MAC analysis)"],
+      "test_candidate": {
+        "acquirer": "BAWAG Group AG",
+        "current_target": "PTSB (Permanent TSB)",
+        "context": "Active PTSB merger arb dossier; recommended cash offer announced",
+        "expected_output_features": ["BAWAG prior M&A history", "EU regulatory outcomes", "Time-to-close distribution", "Financing approach pattern"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "acquirer_ma_history.py (EDGAR + international regulators), regulatory_outcome_tracker.py (per-jurisdiction parsing), mac_clause_extractor.py (parse definitive agreements)",
+      "dependencies": [],
+      "estimated_complexity": "high"
+    },
+    {
+      "id": "P5",
+      "name": "analyze-litigation-expected-value",
+      "phase": 2,
+      "phase_order": 8,
+      "profile_scope": "litigation",
+      "description": "Outcome probability tree x magnitude per outcome x time-to-resolution for litigation candidates. Includes built-in precedent lookup (settlement multiples, jurisdiction patterns).",
+      "methodology_summary": "Input: case ID, court, parties, claim type and size. Build outcome probability tree: dismissed (motion to dismiss success rate by jurisdiction and case type), settled (settlement frequency by case type and stage), verdict (probability of verdict for plaintiff/defendant). For each outcome branch, estimate magnitude: dismissed (cost incurred only), settled (settlement multiples vs claim by precedent), verdict (damages distribution from comparable cases). Time-to-resolution: median days by jurisdiction and case type. Compute expected value with discount rate. Precedent lookup: for the case type (e.g., securities fraud, antitrust, patent infringement, ITC 337, PTAB IPR, Delaware Chancery), pull last 10y comparable resolved cases with outcomes and settlement amounts. Handles SEC enforcement variants: AAER patterns, disgorgement multiples, DOJ parallel proceedings, NPA/DPA frequency.",
+      "required_inputs": ["case_id_or_docket", "court", "case_type", "parties", "claim_amount"],
+      "required_outputs": ["skills/analyze-litigation-expected-value/outputs/<case>_ev_analysis.md", "skills/analyze-litigation-expected-value/outputs/<case>_outcome_tree.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/framework/profile_litigation.md",
+        "Investment tool backup/02_System/engine/signals/strategies/lit_federal_civil.md",
+        "Investment tool backup/02_System/engine/signals/strategies/lit_delaware_chancery.md",
+        "Investment tool backup/02_System/engine/signals/strategies/lit_sec_enforcement.md",
+        "Investment tool backup/02_System/engine/signals/strategies/lit_itc_337.md",
+        "Investment tool backup/02_System/engine/signals/strategies/lit_ptab_ipr.md"
+      ],
+      "primary_sources": ["CourtListener API (federal civil)", "Delaware Court of Chancery docket", "ITC EDIS", "USPTO PTAB", "SEC litigation releases", "DOJ press releases"],
+      "test_candidate": {
+        "case": "most_recent_sec_enforcement_signal",
+        "context": "Pick the most recent signal from sec_enforcement_scanner output in 02_System/engine/signals/",
+        "expected_output_features": ["Outcome tree with explicit probabilities", "Precedent settlements listed", "EV computed with discount rate", "Auth-required handling for CourtListener if token absent"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "case_outcome_tree.py (probability tree builder), precedent_settlements.py (lookup by case type), discount_rate_calc.py (NPV with time-to-resolution)",
+      "dependencies": [],
+      "estimated_complexity": "high",
+      "known_blockers": ["CourtListener API token (Q-017 in OPEN_QUESTIONS) — skill must return clear 'auth_required' status if token missing, not crash"]
+    },
+    {
+      "id": "M1",
+      "name": "harvest-historical-events",
+      "phase": 3,
+      "phase_order": 9,
+      "profile_scope": "methodology",
+      "description": "Generic event backfill engine, parameterized by profile, filing types, date range, target n. Resumable, atomic-write, rate-limit respecting.",
+      "methodology_summary": "Input: profile name, filing types list, date range, target n events. For merger_arb (DEFM14A, S-4, SC TO, SC 13E3), activist (SC 13D, SC 13D/A), insider (Form 4 with cluster detection), binary_catalyst (FDA approvals list, AdCom calendar), litigation (court dockets by case type). Workflow: query SEC EDGAR full-text search (or relevant primary source) with rate-limit respect, paginate, dedupe, parse filing metadata (filer/issuer, CIK, date, type, deal value where applicable), resolve tickers to FIGIs via OpenFIGI (with 5-char JP ticker handling per Q-003), checkpoint progress to JSON every 50 events, atomic write final ledger. Mirror plan_p1_03_harvest.py shape but generalized. Resumable: if interrupted, reads checkpoint and continues from last successful event.",
+      "required_inputs": ["profile", "filing_types", "date_range", "target_n", "resume_from_checkpoint (optional)"],
+      "required_outputs": ["skills/harvest-historical-events/outputs/<profile>_<run_id>_events.json", "skills/harvest-historical-events/outputs/<profile>_<run_id>_checkpoint.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/training/iteration_4_merger_arb_features.json",
+        "Investment tool backup/02_System/engine/training/historical_events_ledger.json"
+      ],
+      "primary_sources": ["SEC EDGAR full-text search API", "SEC EDGAR submissions API", "FDA approvals API", "CourtListener API (with token)", "OpenFIGI API"],
+      "test_candidate": {
+        "task": "Replicate PLAN_OF_RECORD Phase 1 P1.03 harvest",
+        "params": "profile=merger_arb, filing_types=[DEFM14A, S-4], date_range=2020-01-01..2024-12-31, target_n=20",
+        "expected_output_features": ["20 events harvested with FIGIs", "Checkpoint file present", "All events have CIK + date + filing_type", "Resumable on interrupt"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "edgar_fulltext_search.py (rate-limited paginated search), figi_resolver.py (OpenFIGI with JP 5-char fix), event_dedupe.py (CIK + date + type), atomic_write.py (temp file + rename)",
+      "dependencies": [],
+      "estimated_complexity": "high"
+    },
+    {
+      "id": "M2",
+      "name": "label-outcomes-from-prices",
+      "phase": 3,
+      "phase_order": 10,
+      "profile_scope": "methodology",
+      "description": "Forward-return resolution via yfinance with profile-specific HIT/MISS/PARTIAL thresholds.",
+      "methodology_summary": "Input: events ledger (output of M1), profile, return windows (1m/3m/6m/12m typical). For each event: fetch ticker price series from yfinance (handling delistings, ticker changes, exchange listings, spin-offs), compute forward returns at each window, apply profile-specific thresholds: merger_arb (annualized return vs deal spread; HIT if > spread / lookback annualized); activist (forward return + governance change verification per filing follow-ups; HIT if both); insider (90d forward return vs sector; HIT if > +5% absolute and beats sector by 2pp); binary_catalyst (FDA approval vs CRL; HIT/MISS binary); litigation (forward return after resolution; HIT if positive against thesis direction). Atomic write outcomes ledger entries. Handle edge cases: delistings (lookup OTC fallback), spin-offs (track child entity), name changes (CIK-based resolution), corporate actions (split-adjusted prices).",
+      "required_inputs": ["events_ledger_path", "profile", "return_windows_days"],
+      "required_outputs": ["skills/label-outcomes-from-prices/outputs/<profile>_<run_id>_outcomes.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/training/historical_events_ledger.json",
+        "Investment tool backup/02_System/engine/outcomes/outcomes_ledger.json",
+        "Investment tool backup/02_System/engine/docs/DECISIONS.md"
+      ],
+      "primary_sources": ["yfinance (Yahoo Finance)", "SEC EDGAR (for governance follow-up filings)", "FDA approvals database (for binary_catalyst outcomes)"],
+      "test_candidate": {
+        "task": "Label outcomes for the M1 test harvest (20 merger_arb events)",
+        "expected_output_features": ["All events labeled HIT/MISS/PARTIAL with reason", "Forward returns computed at all windows", "Delisting/spin-off/name-change handling demonstrated", "Atomic-write compliance"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "yfinance_fetch.py (with delisting fallback), corporate_actions.py (split/spinoff handling), profile_thresholds.py (per-profile HIT/MISS rules)",
+      "dependencies": ["M1"],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": "M3",
+      "name": "extract-event-features",
+      "phase": 3,
+      "phase_order": 11,
+      "profile_scope": "methodology",
+      "description": "Iter-4 feature engineering generalized: prospective deal-economics features per profile.",
+      "methodology_summary": "Input: events ledger with outcomes (output of M2), profile. For each event, extract profile-specific feature vector: merger_arb (target market cap, 30d runup, post-filing reaction, sector, deal type, is_definitive); activist (market cap, 60d/252d underperformance binary, lifecycle stage initial-vs-amendment, sector); insider (transaction code, role, $ value, $ as % of float, 30d/5d pre-event price, dip-buy binary); binary_catalyst (approval probability priors, mispricing magnitude, move size, MoA class); litigation (case type, jurisdiction, claim amount, party type, motion stage). Mirror iter-4 features exactly. Output: features matrix in JSON (one row per event, columns per feature) plus feature dictionary documentation.",
+      "required_inputs": ["outcomes_ledger_path", "profile"],
+      "required_outputs": ["skills/extract-event-features/outputs/<profile>_<run_id>_features.json", "skills/extract-event-features/outputs/<profile>_feature_dictionary.md"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/training/iteration_4_merger_arb_features.py",
+        "Investment tool backup/02_System/engine/training/iteration_4_activist_features.py",
+        "Investment tool backup/02_System/engine/training/iteration_4_insider_features.py",
+        "Investment tool backup/02_System/engine/training/scorecard_iteration_4.md"
+      ],
+      "primary_sources": ["Outcomes ledger from M2", "yfinance for price-based features", "EDGAR for filing metadata features"],
+      "test_candidate": {
+        "task": "Extract features for the M1+M2 test ledger (20 merger_arb events)",
+        "expected_output_features": ["All iter-4 merger_arb features computed", "One row per event", "Feature dictionary documents each column", "No leakage features (per D-097 RESOLVER_LEAKAGE_FEATURES check)"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "feature_extractors_<profile>.py (one per profile, reuses iter-4 logic), leakage_check.py (D-097 detector), feature_dictionary_writer.py",
+      "dependencies": ["M2"],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": "U3",
+      "name": "compare-to-historical-precedents",
+      "phase": 4,
+      "phase_order": 12,
+      "profile_scope": "universal",
+      "description": "K-NN against historical events ledger. Anchors thesis to base rates from real precedent.",
+      "methodology_summary": "Input: candidate ID, profile, candidate features (from M3 if pre-extracted, or computed inline). K-NN distance: profile-weighted feature distance using iter-4 features. Pull K=5 nearest neighbors from historical_events_ledger.json (post-PLAN_OF_RECORD ledger expansion makes this dense). For each neighbor: report event details, outcome (HIT/MISS/PARTIAL), forward return at relevant window, similarity score. Compute aggregate base rate: outcome distribution across K neighbors, median return, return distribution shape. Output: precedent reference class document with explicit reasoning. Graceful degradation: if K=5 neighbors not available (sparse profile), use what's available with explicit 'low-density reference class' warning.",
+      "required_inputs": ["candidate_id", "profile", "candidate_features (optional, computed if absent)"],
+      "required_outputs": ["skills/compare-to-historical-precedents/outputs/<candidate>_precedents.md", "skills/compare-to-historical-precedents/outputs/<candidate>_knn.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/training/historical_events_ledger.json",
+        "Investment tool backup/02_System/engine/training/scorecard_iteration_4.md"
+      ],
+      "primary_sources": ["historical_events_ledger.json (988+ events, expanding via PLAN_OF_RECORD)"],
+      "test_candidate": {
+        "ticker": "RPAY",
+        "profile": "activist_governance",
+        "expected_output_features": ["K=5 neighbors identified with similarity scores", "Outcome distribution computed", "Median return computed", "Source URL for each precedent event"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "knn_distance.py (profile-weighted feature distance), reference_class_aggregator.py, sparse_handling.py",
+      "dependencies": ["M3"],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": "P6",
+      "name": "assess-takeover-vulnerability",
+      "phase": 4,
+      "phase_order": 13,
+      "profile_scope": "merger_arb_pre_edge",
+      "description": "Forward-looking takeover vulnerability assessment for pre-edge merger_arb signals.",
+      "methodology_summary": "Input: company ticker. Vulnerability dimensions: ownership concentration (top-10 holders, insider stake, free float), board defenses (poison pill triggers, staggered board, advance notice bylaws, golden parachutes, supermajority requirements), strategic fit with logical acquirers (sector consolidation patterns, recent M&A in sector, comparable transaction multiples), financial attractiveness (EV/EBITDA vs sector, EV/Sales, FCF yield, debt capacity headroom for an acquirer to lever up), activist pressure history (any prior 13D filings, recent Form 4 selling by insiders, depressed valuation vs peers). Calls P4 (research-acquirer-history) on the most plausible acquirer set. Output: vulnerability score with breakdown, plausible acquirer ranked list with rationale, expected timeline to deal announcement.",
+      "required_inputs": ["ticker", "sector"],
+      "required_outputs": ["skills/assess-takeover-vulnerability/outputs/<ticker>_vulnerability.md", "skills/assess-takeover-vulnerability/outputs/<ticker>_acquirer_set.json"],
+      "references_to_read": [
+        "Investment tool backup/02_System/engine/signals/strategies/pre_edge_takeover_candidate.md",
+        "Investment tool backup/02_System/engine/framework/profile_merger_arb.md"
+      ],
+      "primary_sources": ["SEC EDGAR (proxy filings for board defenses, 13F for ownership)", "Definitive proxy statements (DEF 14A) for governance documents", "Sector M&A press releases"],
+      "test_candidate": {
+        "task": "Most recent takeover_candidate_scanner output",
+        "lookup_path": "Investment tool backup/02_System/engine/signals/ for most recent takeover_candidate output",
+        "expected_output_features": ["Vulnerability score with per-dimension breakdown", "Top-3 plausible acquirers with rationale", "Comparable transaction multiples cited"]
+      },
+      "helper_scripts_needed": true,
+      "helper_scripts_description": "ownership_concentration.py (13F parsing), board_defenses_extractor.py (DEF 14A parsing), comp_multiples.py (sector EV/EBITDA from EDGAR)",
+      "dependencies": ["P4"],
+      "estimated_complexity": "medium"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/fda_agent_medical.json",
+  "title": "FDA Medical Agent Output",
+  "description": "Structured JSON the medical specialist agent emits for one fda_regulatory_events row. Validated by modal_workers/shared/fda_agent_validator.py before any DB write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "endpoint_quality",
+    "safety_concerns",
+    "effect_size_pp",
+    "precedent_class_outcome",
+    "fair_probability_modifier",
+    "citations",
+    "confidence"
+  ],
+  "properties": {
+    "endpoint_quality": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "1=poor (post-hoc, surrogate, small N) ... 5=hard endpoint, well-powered, prespecified."
+    },
+    "safety_concerns": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 20,
+      "description": "Short phrases describing safety signals from the trial or pharmacovigilance data."
+    },
+    "effect_size_pp": {
+      "type": "number",
+      "description": "Magnitude on the primary endpoint vs control, in absolute percentage points or other natural units. Negative values are allowed (drug worsened the endpoint)."
+    },
+    "precedent_class_outcome": {
+      "type": "string",
+      "enum": ["approved", "crl", "mixed", "none"],
+      "description": "Most recent FDA outcome in the same therapeutic class / mechanism."
+    },
+    "fair_probability_modifier": {
+      "type": "number",
+      "minimum": -0.10,
+      "maximum": 0.10,
+      "description": "Signed adjustment in pp to fair_probability. Bounded ±0.10 by the validator and re-clamped in compose_features."
+    },
+    "insufficient_signal": {
+      "type": "boolean",
+      "default": false,
+      "description": "Set to true when the medical evidence does not support an asymmetry claim. Honest decline > hedged prose."
+    },
+    "citations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "quote"],
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "quote": { "type": "string", "minLength": 4 },
+          "evidence_id": { "type": "string" }
+        }
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "version": {
+      "type": "string",
+      "description": "Skill semver."
+    }
+  }
+}
