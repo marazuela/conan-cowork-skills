@@ -26,7 +26,7 @@ The skill is invoked when:
 | `document_set` | uuid[] | `["e1f2…", "9a8b…"]` | yes — documents the orchestrator would have had access to as of the reference date (no leakage) |
 | `eval_case_id` | uuid | row id in `public.eval_harness` | optional — when present, the skill writes its output keyed by this id and `realized_outcome` is available for grading downstream (the skill itself does NOT read realized_outcome — that would be leakage) |
 | `orchestrator_run_id` | uuid | `dfc0ef55-…` | optional — when present, the skill writes its output keyed by this id so the sidecar driver can join against the live `convergence_assessments` row |
-| `output_dir` | path | `skills_v2/assess-fda-binary-catalyst/outputs/` | optional |
+| `output_dir` | path | `skills/assess-fda-binary-catalyst/outputs/` | optional |
 | `enable_subskills` | bool | `true` | optional, default `true` — whether to invoke P1 / U3 sub-skills for trial forensics and historical precedents |
 
 The skill reads `realized_outcome` ONLY for refusal-mode auditing (to confirm the input case is actually resolvable). When constructing the prediction it MUST NOT consult `realized_outcome`, `realized_outcome_data`, or any document with a timestamp greater than `reference_assessment_date`. Leakage is the most common failure mode; the skill self-checks before emitting.
@@ -234,7 +234,7 @@ No silent failures. Every degraded path produces an explicit ledger entry in `_m
 - Eval harness loader: `orchestrator_runtime/eval_harness/gold_standard.py` (`HarnessCase`, `is_direction_correct`).
 - Eval scoring: `orchestrator_runtime/eval_harness/metrics.py` (`calibration_curve`, `ranking_auc`, `aggregate`).
 - Live orchestrator stages this skill consolidates: `orchestrator_runtime/runtime.py` Stage 1 (synthesis), `hypothesis.py` Stage 2, `premortem.py` Stage 3, `constitutional.py` Stage 7, `runtime.py:662` Stage 9.
-- Sub-skills: `skills_v2/analyze-fda-approval-prospects/SKILL.md` (P1), `skills_v2/compare-to-historical-precedents/SKILL.md` (U3).
+- Sub-skills: `skills/analyze-fda-approval-prospects/SKILL.md` (P1), `skills/compare-to-historical-precedents/SKILL.md` (U3).
 - Driver routine: `skills/skill_eval_replay.md` — drives this skill against the 271-case `eval_harness` and produces a comparison report vs. live orchestrator's `convergence_assessments` for the same `(asset_id, reference_assessment_date)`.
 - Default model: `claude-opus-4-7` (matches PR #40, `orchestrator_runtime/client.py:31`).
 

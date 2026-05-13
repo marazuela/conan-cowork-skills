@@ -65,7 +65,7 @@ DO NOT select `realized_outcome` or `realized_outcome_data` here — those are l
 ### 3. Pre-create output directory
 
 ```
-<repo_root>/skills_v2/assess-fda-binary-catalyst/outputs/eval_runs/<run_id>/
+<repo_root>/skills/assess-fda-binary-catalyst/outputs/eval_runs/<run_id>/
   ├── _index.jsonl       (one line per completed case; written by the skill)
   ├── _refusals.jsonl    (one line per refused case; written by this routine)
   ├── _progress.json     (rolling cost + completion counter; written by this routine)
@@ -220,7 +220,7 @@ Stdout JSON for the operator dashboard:
 
 ## Known dependencies (verify before scheduling)
 
-1. **`assess-fda-binary-catalyst` skill exists** at `conan-cowork-skills/skills_v2/assess-fda-binary-catalyst/SKILL.md`. If missing, this routine is a no-op — fail fast with `skill_not_found`.
+1. **`assess-fda-binary-catalyst` skill exists** at `conan-cowork-skills/skills/assess-fda-binary-catalyst/SKILL.md`. If missing, this routine is a no-op — fail fast with `skill_not_found`.
 2. **Sub-skills P1 + U3** referenced by the skill exist (per STATUS.md, P1 is Tier-2 / smoke-test only, U3 is Tier-1). If P1 or U3 errors, the skill widens its probability spread and continues — the driver does not need to special-case.
 3. **Eval-harness Python loader importable**: `orchestrator_runtime.eval_harness.gold_standard` + `metrics`. If running outside the conan repo, fall back to inline SQL + reimplement `is_direction_correct` from `gold_standard.py` lines 99-116 verbatim.
 4. **Anthropic API credit balance positive.** A credit-exhaustion mid-sweep aborts the run and the partial outputs are preserved. Operator must restock credits before resuming. (Cf. 2026-05-11 incident — credit exhaustion took the live orchestrator down for ~14h.)
@@ -228,7 +228,7 @@ Stdout JSON for the operator dashboard:
 
 ## Reference
 
-- Skill being driven: `conan-cowork-skills/skills_v2/assess-fda-binary-catalyst/SKILL.md`
+- Skill being driven: `conan-cowork-skills/skills/assess-fda-binary-catalyst/SKILL.md`
 - Eval cases: `public.eval_harness` (271 rows, schema in migration `20260506000010_v3_phase_0_1_schema.sql`)
 - Loader: `orchestrator_runtime/eval_harness/gold_standard.py` — `HarnessCase`, `load_holdout_set`, `load_dev_set`, `load_all`, `is_direction_correct`
 - Scoring: `orchestrator_runtime/eval_harness/metrics.py` — `calibration_curve`, `ranking_auc`, `aggregate`, `EvalRunResult.as_eval_runs_row`
