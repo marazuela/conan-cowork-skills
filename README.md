@@ -16,12 +16,48 @@ Both machines connect to the same Supabase project (`xvwvwbnxdsjpnealarkh`) via 
 ## Layout
 
 ```
-skills/      # Claude skill definitions (one .md per skill, loaded by the Claude desktop at runtime)
-wrappers/    # Paste-ready Cowork scheduled-task prompts (one .md per scheduled task)
-reference/   # Docs the skills cite at runtime (spec sections, scoring rubric)
+skills/         # v1 Claude skill definitions (queue-drain pipeline; being retired)
+skills_v2/      # v2 skill bundles (analyst toolkit; methodology + Python helpers)
+  _shared/      # cross-skill helpers (env_resolver, storage_sync)
+  _meta/        # acceptance gates (path_validation.py)
+  <13 skills>/  # SKILL.md + helpers/ + outputs/ per bundle
+wrappers/       # v1 Cowork scheduled-task prompts (being retired)
+wrappers_v2/    # v2 wrappers (u4_kill_sweep, m1_m2_m3_weekly, analyze_on_demand, p6_takeover_discovery)
+reference/      # v1 docs the skills cite (spec.md, CONAN_SCORING_METHOD.md)
+reference/v2/   # v2 reference content (framework/, training/, docs/, strategies/, health/)
+dossiers/       # active + archived candidate dossiers (v2 source of truth)
+outputs/        # per-skill output dir (gitignored; mirrors to Supabase Storage)
 ```
 
-See [`wrappers/README.md`](wrappers/README.md) for the scheduled-task registration pattern and `$CONAN_ROOT` conventions.
+See [`wrappers/README.md`](wrappers/README.md) for v1 scheduled-task patterns. See `wrappers_v2/README.md` (forthcoming) for v2.
+
+## v2 environment variables
+
+v2 skills resolve all paths via `skills_v2/_shared/env_resolver.py`. Set these once on each runner machine; defaults work if `CONAN_COWORK_ROOT` is set:
+
+| Env var | Purpose | Default |
+|---|---|---|
+| `CONAN_COWORK_ROOT` | base of this repo checkout | (none — set explicitly) |
+| `CONAN_REFERENCE_ROOT` | reference content | `${CONAN_COWORK_ROOT}/reference/v2` |
+| `CONAN_DOSSIERS_ROOT` | active + archived dossiers | `${CONAN_COWORK_ROOT}/dossiers` |
+| `CONAN_OUTPUTS_ROOT` | per-skill output dir (gitignored) | `${CONAN_COWORK_ROOT}/outputs` |
+
+Mac (zsh):
+```bash
+echo 'export CONAN_COWORK_ROOT=/Users/Pico/Documents/Claude/Projects/conan-cowork-skills' >> ~/.zshrc
+```
+
+Windows (PowerShell):
+```powershell
+setx CONAN_COWORK_ROOT "C:\Users\<you>\conan-cowork-skills"
+```
+
+Verify with:
+```bash
+python3 skills_v2/_meta/path_validation.py
+```
+
+The validator confirms all four roots resolve, every required reference file exists (Phase 0c porting checklist), and all 13 v2 skill bundles are present. Exit 0 = ready.
 
 ## What each skill does
 

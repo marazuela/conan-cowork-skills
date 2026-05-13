@@ -1,13 +1,17 @@
 ---
 name: coverage_auditor
 description: Weekly recall audit. For every material catalyst in catalyst_universe whose catalyst_date fell in the past week (with 180d drill-back for monthly trend), join against emissions_ledger to determine if we caught it pre-edge, caught it post-edge, emitted without promoting, or never emitted at all. Writes top-10 "should have caught" cases to operator_flags and a summary markdown to reports/coverage/YYYY-WW.md. Runs mechanically (pure SQL + bucketing) — NO Claude reasoning, NO quota. Primary consumer of the emissions_ledger view foundation shipped 2026-04-21.
-trigger: Weekly scheduled task UTC Sunday 04:00 (precedes reporting_weekly_cron at Sun 12:00 UTC so misses surface in the weekly PDF) OR on-demand "run coverage audit" / "weekly recall audit"
-quota: No Claude quota consumed. All computation is SQL-level. Budget: typically <60s wall-clock, one Supabase round-trip per query.
+trigger: **Executed as code, NOT a Cowork scheduled task.** Runs as the first step of the existing `reporting_weekly` Modal function (cron `0 12 * * 0` UTC) — flags land before the weekly PDF renders in the same invocation. On-demand re-run via `modal run conan-v2::reporting_weekly_once` or Cowork phrase "run coverage audit" / "weekly recall audit" (skill body is the on-demand spec).
+quota: No Claude quota consumed. All computation is SQL-level. Budget: typically <60s wall-clock, one Supabase round-trip per query. Does NOT occupy a Cowork run slot.
 ---
 
 You are the coverage auditor for the Conan v2 accuracy feedback loop. Once per UTC week you reconcile every material catalyst that actually happened in the world (`catalyst_universe`) against every signal the pipeline emitted (`emissions_ledger` view), surface the ones we missed, and produce a report that drives threshold tuning and scanner-gap prioritization.
 
 You are the first thing the feedback loop does with ground truth. Pedro built you to answer one question: "of the material catalysts that happened this week, which did we catch pre-edge, and for the ones we didn't, why?"
+
+## Deployment (2026-04-23)
+
+**Primary execution surface: Modal**, folded into `reporting_weekly` as its first step. No Cowork scheduled task, no Claude runtime session on the hot path. The skill body below remains the authoritative spec — both the Modal implementation and any on-demand Cowork re-run follow these steps. The on-demand Cowork path exists only for manual audits; it must not be wired to a schedule.
 
 ## Invariants
 

@@ -15,7 +15,11 @@ You answer that by bucketing each sample into one of eight classifications, aggr
 2. **Fresh context per challenger invocation.** Each challenger call is a separate routine invocation — no shared prior between samples, and no shared prior with the original drafting session. Context contamination invalidates the "would today's challenger disagree" property you are measuring.
 3. **Stratified sampling.** Uniform-random over all outcomes is dominated by `killed` / `expired` lifecycle states before `outcome_label` is filled. Stratify on `outcome_label` to force informative mixes. Cap total at 10 per run.
 4. **Bounded quota.** Maximum 10 challenger calls per run. If the sample is smaller (insufficient labeled data), you run fewer and exit without flagging. Never invoke the challenger more than 10 times even if the sample is larger.
-5. **Rate flags require minimum samples.** `miss_rate` requires `pre_edge_hit_sampled ≥ 5` before flagging. `pass_through_rate` requires `dead_catalyst_sampled ≥ 5`. Below threshold → no flag, regardless of rate. Prevents noise from tiny samples.
+5. **Two-tier sample gating.** Each run is classified `tier='preview'` or `tier='full'` based on per-label sample depth, recorded in `accuracy_metrics.evidence->>'tier'`:
+   - `tier='preview'` — `pre_edge_hit_sampled ≥ 3` OR `dead_catalyst_sampled ≥ 3`. Writes the `accuracy_metrics` row but **never raises `operator_flags`**. Lets the time series start populating before sample volume can support per-run flagging.
+   - `tier='full'` — `pre_edge_hit_sampled ≥ 5` AND `dead_catalyst_sampled ≥ 5`. Cleared to raise the per-run rate flags in step 8.
+   - Below `preview` tier → `tier='insufficient'`, write the empty row, no flags.
+   Per-run rate flags (`challenger_retro_miss`, `challenger_retro_pass_through`) require `tier='full'`. The 30d rolling flag (step 6.5) is independent — it accumulates across runs and fires once cumulative depth is sufficient, even if no single run hit `tier='full'`.
 6. **Drafting mode only.** Invoke `thesis_challenger` with `mode: "drafting"` on every sample. The aging-mode retro is a v2 extension not covered here.
 7. **One accuracy_metrics row per run.** Even on empty-sample runs (no labeled outcomes in window) write ONE row with `auditor='challenger_retro'`, `insufficient_sample=true`, `sample_n=0`. Preserves the time series so Pedro can see "the auditor ran."
 
@@ -74,9 +78,24 @@ SELECT id, primary_ticker, primary_mic, name, country, market_cap_usd
 FROM public.entities WHERE id = $signal.entity_id;
 SELECT name, geography, default_scoring_profile
 FROM public.scanners WHERE id = $signal.scanner_id;
+
+-- For DLQ'd samples (thesis_drafting_failures rows): also fetch the historical
+-- decline_verdict (drafter self-decline at step 6.5) when no challenge_verdict
+-- exists. The drafter is the source of declines — the challenger was NOT invoked.
+-- The retro classifies decline verdicts on a separate axis (over_decline /
+-- early_save / timing_save) tracked alongside miss/save.
+SELECT all_drafts->jsonb_array_length(all_drafts)-1->'decline_verdict'   AS decline_verdict,
+       all_drafts->jsonb_array_length(all_drafts)-1->'challenge_verdict' AS challenge_verdict,
+       challenger_prompt_sha
+FROM public.thesis_drafting_failures
+WHERE thesis_job_id IN (
+  SELECT id FROM public.thesis_jobs WHERE candidate_id = $candidate_id
+)
+ORDER BY created_at DESC
+LIMIT 1;
 ```
 
-Extract the historical thesis JSON from `payload.thesis`. This was the object the challenger evaluated originally.
+Extract the historical thesis JSON from `payload.thesis`. This was the object the challenger evaluated originally. If the sample candidate DLQ'd (no `payload.thesis`), use the most recent draft from `thesis_drafting_failures.all_drafts[-1].draft` — and capture the historical `decline_verdict` if present so step 5 can bucket it without re-invoking the challenger.
 
 ### 4. Invoke the challenger (drafting mode) per sample
 
@@ -104,12 +123,17 @@ Capture the returned verdict JSON verbatim: `{verdict, reasons, required_fixes, 
 | `pre_edge_hit` | `confirm` | `calibrated_hit` — ✓ challenger endorses a known winner |
 | `pre_edge_hit` | `challenge` | `ambiguous_hit` — retry path; drafter would have revised |
 | `pre_edge_hit` | `kill` | **`miss`** — ✗ challenger would block a known winner |
+| `pre_edge_hit` | `decline` | **`over_decline`** — ✗ drafter self-declined a known winner. Tracked separately from `miss` because decline is cautious (drafter never invoked the challenger), not adversarial. Do NOT count toward `miss_rate`. |
 | `dead_catalyst` | `kill` | `save` — ✓ challenger catches a known loser |
 | `dead_catalyst` | `challenge` | `partial_save` — soft catch |
 | `dead_catalyst` | `confirm` | **`pass_through`** — ✗ challenger still promotes a known loser |
+| `dead_catalyst` | `decline` | `early_save` — ✓ drafter caught a known loser without invoking the challenger (saved a Claude call) |
 | `post_edge_miss` | `kill` | `timing_catch` — ✓ challenger sniffs stale emission |
 | `post_edge_miss` | `challenge` | `timing_catch` — counted with kill for timing purposes |
 | `post_edge_miss` | `confirm` | **`timing_miss`** — ✗ challenger doesn't catch stale emissions |
+| `post_edge_miss` | `decline` | `timing_save` — ✓ drafter sniffed stale emission without invoking the challenger |
+
+The 4th-axis verdict `decline` comes from the historical `decline_verdict` field on `thesis_drafting_failures.all_drafts[-1]` (drafter self-decline at thesis_writer step 6.5). For these samples the retro does NOT re-invoke the challenger — the historical decision is the verdict. Older DLQ'd rows without a `decline_verdict` field (legacy `routine_declined: …` prose) are excluded from the decline tally.
 
 Samples with other `outcome_label` values are excluded from rate metrics but kept in `evidence`.
 
@@ -124,6 +148,41 @@ save_rate         = save_n / dead_catalyst_sampled
 calibrated_hit_rate = calibrated_hit_n / pre_edge_hit_sampled
 ```
 
+Determine the run tier per invariant 5:
+
+```
+tier = CASE
+  WHEN pre_edge_hit_sampled >= 5 AND dead_catalyst_sampled >= 5 THEN 'full'
+  WHEN pre_edge_hit_sampled >= 3 OR  dead_catalyst_sampled >= 3 THEN 'preview'
+  ELSE 'insufficient'
+END
+```
+
+Stash `tier` inside `evidence_jsonb.tier` for the next step's INSERT.
+
+### 6.5. Rolling 30-day aggregator (independent flag surface)
+
+Per-run rate flags need ≥5 hit + ≥5 catalyst samples in a single run. At early-life volume (≈24 promoted candidates / 30d), no single Sunday run will hit that bar; per-run flags stay dark even when miss_rate is genuinely drifting. The 30d rolling aggregator closes that gap by accumulating across the previous 4 retro runs.
+
+```sql
+WITH window AS (
+  SELECT calibrated_hit_n, miss_n, sampled_total
+  FROM   public.accuracy_metrics
+  WHERE  auditor = 'challenger_retro'
+    AND  measured_at >= now() - interval '30 days'
+    AND  insufficient_sample = false
+  ORDER BY measured_at DESC
+  LIMIT 4
+)
+SELECT COALESCE(SUM(calibrated_hit_n), 0) AS rolling_hits,
+       COALESCE(SUM(miss_n),           0) AS rolling_misses,
+       COALESCE(SUM(calibrated_hit_n + miss_n), 0) AS rolling_n,
+       COUNT(*) AS rolling_runs_used
+FROM window;
+```
+
+Compute `rolling_miss_rate = rolling_misses / NULLIF(rolling_n, 0)`. Both values feed step 8's `challenger_retro_rolling_miss` flag.
+
 ### 7. Write accuracy_metrics row (one per run)
 
 ```sql
@@ -134,6 +193,7 @@ INSERT INTO public.accuracy_metrics (
   calibrated_hit_n, ambiguous_hit_n, miss_n,
   save_n, partial_save_n, pass_through_n,
   timing_catch_n, timing_miss_n,
+  decline_n, over_decline_n, early_save_n, timing_save_n,
   miss_rate, pass_through_rate, save_rate, calibrated_hit_rate,
   evidence
 ) VALUES (
@@ -143,23 +203,29 @@ INSERT INTO public.accuracy_metrics (
   $calibrated_hit_n, $ambiguous_hit_n, $miss_n,
   $save_n, $partial_save_n, $pass_through_n,
   $timing_catch_n, $timing_miss_n,
+  $decline_n, $over_decline_n, $early_save_n, $timing_save_n,
   $miss_rate, $pass_through_rate, $save_rate, $calibrated_hit_rate,
   $evidence_jsonb
 );
 ```
 
-`evidence_jsonb` is a JSON array of per-sample records: `[{candidate_id, ticker, mic, outcome_label, verdict, reasons, strongest_counter}, ...]`. This is Pedro's audit trail — the full trace of which candidates were sampled and what today's challenger said about each.
+`decline_n` is the total drafter self-decline count across all outcome labels in this run; `over_decline_n` / `early_save_n` / `timing_save_n` are the per-label breakdowns from step 5's classification table. These columns survive default 0 on legacy rows; they only populate once thesis_writer step 6.5 starts emitting `decline_verdict` objects.
+
+`evidence_jsonb` is a JSON object: `{tier: 'preview'|'full'|'insufficient', samples: [{candidate_id, ticker, mic, outcome_label, verdict, reasons, strongest_counter}, ...]}`. The `samples` array is Pedro's audit trail; `tier` lets the dashboard / step-8 logic gate behavior on sample depth without re-deriving it from the per-label counts.
 
 ### 8. Raise operator_flags on threshold breach
 
 For each flag kind below, check the condition and upsert via the `operator_flags` partial unique index on `(source, kind, coalesce(candidate_id::text,''))` WHERE `resolved_at IS NULL`.
 
+Per-run rate flags require `tier='full'` (single-run statistical confidence). The rolling-30d flag is independent and fires once cumulative depth is sufficient even if no single run hit `tier='full'`.
+
 | kind | severity | condition |
 |---|---|---|
-| `challenger_retro_miss` | `warn` | `miss_rate >= 0.10` AND `pre_edge_hit_sampled >= 5` |
-| `challenger_retro_miss` | `critical` | `miss_rate >= 0.25` AND `pre_edge_hit_sampled >= 5` |
-| `challenger_retro_pass_through` | `warn` | `pass_through_rate >= 0.25` AND `dead_catalyst_sampled >= 5` |
-| `challenger_retro_timing_blindspot` | `warn` | `timing_miss_n >= 2` AND `post_edge_miss_sampled >= 3` |
+| `challenger_retro_miss` | `warn` | `tier='full'` AND `miss_rate >= 0.10` |
+| `challenger_retro_miss` | `critical` | `tier='full'` AND `miss_rate >= 0.25` |
+| `challenger_retro_pass_through` | `warn` | `tier='full'` AND `pass_through_rate >= 0.25` |
+| `challenger_retro_timing_blindspot` | `warn` | `tier='full'` AND `timing_miss_n >= 2` AND `post_edge_miss_sampled >= 3` |
+| `challenger_retro_rolling_miss` | `warn` | `rolling_n >= 8` AND `rolling_miss_rate >= 0.10` (from step 6.5; counts `tier='preview'` runs too) |
 
 ```sql
 INSERT INTO public.operator_flags (severity, source, kind, title, body, evidence)

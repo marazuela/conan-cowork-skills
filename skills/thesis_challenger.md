@@ -63,7 +63,8 @@ This is a `kill`, not a `challenge`. The thesis isn't badly written; the signal 
   },
   "entity": {"primary_ticker":"...", "primary_mic":"...", "name":"...", "country":"...", "market_cap_usd": ...},
   "scanner": {"name":"...", "geography":"...", "default_scoring_profile":"..."},
-  "filing_text": "... (may be truncated; <=32KB)"
+  "filing_text": "... (may be truncated; <=32KB)",
+  "caller_spec_sha": "<40 hex; sha256 of this skill file as observed by the caller. May be empty string if caller does not stamp.>"
 }
 ```
 
@@ -97,7 +98,8 @@ In order — first applicable rule determines the verdict. If none fires, `confi
   "reasons": ["≥1 string; each a specific defect or the reason confirmation is warranted", "..."],
   "required_fixes": ["specific corrections the drafter should make; empty array on confirm or kill", "..."],
   "strongest_counter": "≥100 chars. The single best bear argument against the thesis, in your own words, engaging the draft's specifics.",
-  "evidence_citations": ["https://...", "..."]  // URLs from the draft's web_research OR signal.source_url that ground your verdict; empty array on confirm is allowed if the reasons are self-evident from the draft
+  "evidence_citations": ["https://...", "..."],  // URLs from the draft's web_research OR signal.source_url that ground your verdict; empty array on confirm is allowed if the reasons are self-evident from the draft
+  "caller_spec_sha": "<verbatim echo of the input payload's caller_spec_sha — sha256 hex of the caller's view of this skill file. Do not recompute, do not modify; just echo. Empty string if absent from input.>"
 }
 ```
 
@@ -131,7 +133,8 @@ In order — first applicable rule determines the verdict. If none fires, `confi
     "raw_payload": { ... },
     "source_url": "...",
     "scan_date": "..."
-  }
+  },
+  "caller_spec_sha": "<40 hex; sha256 of this skill file as observed by the caller. May be empty string if caller does not stamp.>"
 }
 ```
 
@@ -156,7 +159,8 @@ In order — first applicable rule determines the verdict. If none fires, `confi
   "verdict": "confirm" | "challenge" | "kill",
   "reasons": ["..."],
   "load_bearing_assessment": "≥80 chars. Does the signal concretely satisfy the kill condition's spirit, or merely match its regex? Explain.",
-  "strongest_counter": "≥80 chars. The strongest argument that this trigger claim is a false positive."
+  "strongest_counter": "≥80 chars. The strongest argument that this trigger claim is a false positive.",
+  "caller_spec_sha": "<verbatim echo of the input payload's caller_spec_sha. Do not recompute. Empty string if absent.>"
 }
 ```
 

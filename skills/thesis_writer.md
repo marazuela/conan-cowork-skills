@@ -11,7 +11,7 @@ You are the thesis-writer for the Conan v2 investment research system. You draft
 
 1. **Only Immediate-band signals produce candidates.** `thesis_jobs` rows come from the reactor on `band_with_bonus='immediate'` signals. `needs_scoring` / `scoring` rows are owned by `signal_resolver`, not this skill. Don't promote lower bands.
 2. **Two gates, both authoritative.** Every draft MUST pass BOTH the semantic gate (challenger routine — adversarial "skeptical IC reviewer" frame; returns `confirm`/`challenge`/`kill`) AND the syntactic gate (`assess_thesis_v2` — char counts, boilerplate regex, reasoning-tag coverage) before it becomes a `candidates` row. Neither is sufficient alone. Never bypass either gate.
-3. **Honest decline > hedged prose.** If the signal can't support a real asymmetry claim, set `confidence: "low"` or `insufficient_signal: true` — the job DLQs cleanly and Pedro reviews. A `low` verdict is preferred over a passing thesis that fails the steelman.
+3. **Honest decline > hedged prose, but flagged-pass > DLQ.** If the signal can't support a real asymmetry claim, set `confidence: "low"` or `insufficient_signal: true`. The job promotes to a `state='watch'` candidate flagged via `extensions.routine_declined=true` (skips both gates, **does not consume the 15/day promotion quota**, does not fire fanout email). Operators see the flagged row in the dashboard and must affirmatively clear the flag before any auto-promotion to `active`. A `low` verdict is preferred over a passing thesis that fails the steelman; the flag preserves the audit trail and keeps the candidate visible without polluting the active queue.
 4. **Cite primary sources.** Every `web_research` entry must be a real URL you visited. Never fabricate URLs, dates, or quotes.
 5. **Reasoning tags are load-bearing.** Every claim in `situation` / `why_underpriced` / `steelman` carrying a number, proper noun, or date must be tagged `[verified]`, `[inferred]`, or `[speculated]`. >2 untagged load-bearing sentences is a hard fail.
 6. **Don't draft duplicates.** If `candidates.(ticker, mic)` already exists, update it (event_type=`thesis_drafted_by_claude`) rather than creating a new row. Do NOT use `thesis_updated` — that event_type exists in the schema but is not in the fanout email-trigger set, so re-drafts would send no notification.
@@ -31,6 +31,25 @@ SET status = 'queued', started_at = NULL
 WHERE status = 'drafting'
   AND started_at < now() - interval '30 minutes';
 ```
+
+**Rescue inline-draft-unavailable rows.** When the resolver's inline-draft branch hits a sandbox in which `assess_thesis_v2` infra (Modal/RPC or local shim) is unreachable, it has historically parked rows in `status='scoring_complete_below_immediate'` with a `thesis_writer_should_pickup` gate_reason — an unauthorized terminal transition (signal_resolver.md invariant 7) that this loader's `WHERE status='queued'` then silently skips. Self-heal them so no immediate-band signal stays stranded:
+
+```sql
+UPDATE public.thesis_jobs tj
+SET status        = 'queued',
+    started_at    = NULL,
+    completed_at  = NULL,
+    attempt_count = 0,
+    gate_reasons  = coalesce(tj.gate_reasons, '{}'::text[]) || ARRAY['rescued_from_inline_draft_unavailable']
+FROM public.signals s
+WHERE s.signal_id = tj.signal_id
+  AND tj.status = 'scoring_complete_below_immediate'
+  AND 'thesis_writer_should_pickup' = ANY(tj.gate_reasons)
+  AND s.score IS NOT NULL
+  AND s.band_with_bonus = 'immediate';
+```
+
+The `signals.score IS NOT NULL` predicate is required by the `thesis_jobs_block_zombie_below_immediate` trigger (in case a future variant tries to round-trip back to terminal). The `band_with_bonus='immediate'` predicate ensures we only rescue rows that legitimately belong in this skill's queue.
 
 Then load a generous queued window with signal + scanner context:
 
@@ -64,9 +83,12 @@ SELECT count(*) AS today_promotions
 FROM public.thesis_jobs
 WHERE status = 'promoted'
   AND completed_at >= (now() AT TIME ZONE 'UTC')::date
+  AND (gate_reasons IS NULL OR NOT 'routine_declined_flagged' = ANY(gate_reasons))
 ```
 
 If ≥15 → stop, log a note, leave remaining rows queued. The quota resets at 00:00 UTC.
+
+**Flagged-pass exclusion.** The `gate_reasons` filter excludes the §6.5 honest-decline branch — flagged-pass rows promote to `state='watch'` candidates but don't fire email and aren't tradable until an operator clears the flag, so they don't consume the daily-15 throttle that exists to protect alert volume. Same exclusion applies to the short-positioning sub-quota query below.
 
 Also measure today's promoted short jobs:
 
@@ -77,6 +99,7 @@ JOIN public.signals s ON s.signal_id = tj.signal_id
 WHERE tj.status = 'promoted'
   AND s.scoring_profile = 'short_positioning'
   AND tj.completed_at >= (now() AT TIME ZONE 'UTC')::date
+  AND (tj.gate_reasons IS NULL OR NOT 'routine_declined_flagged' = ANY(tj.gate_reasons))
 ```
 
 Then build the working batch from the queued rows loaded in step 1:
@@ -118,6 +141,86 @@ SELECT name, geography, default_scoring_profile, config
 FROM public.scanners WHERE id = $signal.scanner_id;
 ```
 
+### 4.5. Fast-decline pre-filter (cheap, fail-safe)
+
+Before invoking research / draft / challenger / gate, run three structural checks against the context loaded in step 4. Each is a known historical decline-archetype with ≥90% routine_declined rate; running them as cheap SQL queries before step 5 saves Claude calls on signals that the §6.5 honest-decline path would catch anyway. Conservative — false positives cost a real candidate, false negatives just cost a Claude call, so when in doubt fall through to step 5.
+
+If ANY check fires, synthesize a **stub thesis + decline_verdict** and route through the existing §6.5 → §8c-flagged path. The stub is just enough structure for the §8c-flagged renderer + UPSERT to run; no research, no draft Claude call, no challenger, no syntactic gate, no retry budget consumed.
+
+```python
+# Stub thesis — minimum shape the §8c-flagged renderer accepts.
+prefilter_thesis = {
+    "situation": f"Pre-filter decline (heuristic {check_id}) — see decline_verdict for reasoning.",
+    "why_underpriced": "n/a — pre-filter decline before drafting",
+    "next_catalyst": "n/a",
+    "next_catalyst_date": None,
+    "kill_conditions": "n/a — pre-filter decline before drafting",
+    "steelman": "n/a — pre-filter decline before drafting",
+    "web_research": [],
+    "structured_kill_conditions": [],
+    "confidence": "low",
+    "insufficient_signal": True,
+    "insufficient_signal_reason": prefilter_reason_token,  # e.g. 'repeat_decline_within_30d'
+    "primary_source_citations": [],
+}
+
+# Synthesized decline_verdict — drafter-sourced (no challenger invocation).
+prefilter_verdict = {
+    "verdict": "decline",
+    "reasons": [prefilter_reason_token],
+    "strongest_counter": prefilter_strongest_counter,  # ≥100 chars; per-check template below
+    "evidence_citations": [],
+    "caller_spec_sha": sha256(thesis_writer_md_path),
+    "prefilter_check": check_id,                       # 'H1' | 'H2' | 'H3'
+}
+```
+
+Then jump to **§6.5** with this stub. §6.5 sees `confidence: "low"` and `insufficient_signal: true`, appends the verdict to `all_drafts[last]`, and routes to **§8c-flagged** unchanged. The flagged candidate row carries `extensions.routine_declined=true` exactly like a §6.5 self-decline, with `extensions.decline_verdict.prefilter_check` distinguishing the source.
+
+**H1. Repeat-decline guard** — same `(entity_id, scoring_profile)` previously declined within 30 days.
+
+```sql
+SELECT id, created_at, extensions->>'routine_decline_reason' AS prior_reason
+FROM public.candidates
+WHERE entity_id = $signal.entity_id
+  AND scoring_profile = $signal.scoring_profile
+  AND extensions->>'routine_declined' = 'true'
+  AND created_at > now() - interval '30 days'
+LIMIT 1;
+```
+
+If a row exists: `reasons = ['repeat_decline_within_30d']`. Rationale: the same convergence-class on the same entity declined recently; absent a materially different signal, the same heuristics apply. Stamp the prior `candidate_id` and `prior_reason` into the new flagged row's `extensions.prior_decline_ref` for audit. Operators clear the prior flag (or wait 30 days) to re-enable drafting on this entity+profile.
+
+**H2. Megacap-on-broad-class** — mega-cap parent + broadly-disclosed signal class + no high information-asymmetry signal in the rubric dims.
+
+Conditions (ALL must hold):
+
+- `signals.extensions->'scoring_meta'->'data_freshness'->'market_snapshot'->>'market_cap_usd'` cast to numeric ≥ `20e9` (read live mcap stamped by the rubric_engine). If the snapshot is missing or `status='unavailable'`, skip H2 — do NOT block on absent data.
+- `scoring_profile` ∈ {`takeover_candidate`, `short_positioning`, `merger_arb`, `binary_catalyst`} — the four broad-disclosure classes that historically produce the ITRK archetype.
+- `dimensions->>'information_asymmetry'` IS NULL OR cast to int ≤ 2. (For profiles that don't have `information_asymmetry` as a named dim — `merger_arb`, `binary_catalyst` — treat as "≤2" by default since those rubrics don't separately price asymmetry.)
+
+If all three hold: `reasons = ['ITRK_archetype_megacap_broad_class']`. Rationale: $20B+ mega-cap on widely-disclosed signal sources reaches every fund's screen by the time we see it; absent a specific named edge (counterparty, dated deadline, undisclosed evidence) the marginal Claude call won't surface one. The drafter would self-decline at §6.5 with the same reasoning.
+
+**H3. Stale-catalyst-only** — rubric flagged the catalyst as already-passed or >365d distant.
+
+Conditions (ALL must hold):
+
+- `scoring_profile` ∈ {`binary_catalyst`, `activist_governance`, `merger_arb`, `litigation`} — the four profiles where a `catalyst_timeline` / `resolution_timeline` / `catalyst_clarity` dim of `1` carries the "no proximate forward catalyst" semantic.
+- The relevant timeline dim equals `1`:
+  - `binary_catalyst.catalyst_timeline = 1` (>180d or unknown)
+  - `activist_governance.catalyst_clarity = 1` (no named event)
+  - `merger_arb.annualized_return = 1` (sub-T-bill — proxy for stale spread)
+  - `litigation.resolution_timeline = 1` (>365d to next status event)
+- No structured forward-catalyst date present in `signals.extensions->'forward_catalysts'` (an array of `{date, source}` objects the scanner may populate; absence is the common case).
+
+If all three hold: `reasons = ['stale_catalyst_no_proximate_forward_event']`. Rationale: post-event positioning without a forward forcing mechanism is the LXS / AUTO archetype — the rubric already priced this low, so drafting will produce a hedged thesis the challenger kills.
+
+**Order of evaluation.** H1 first (cheapest — one SQL row check), then H2, then H3. First hit wins; synthesize the verdict for that check and exit. Record which check fired in `decline_verdict.prefilter_check` so `challenger_retro` can track per-heuristic precision over time.
+
+**Tracking.** Record a one-line summary per fast-decline: `"<job_id>: prefilter_decline H<n> ticker.mic (<reason_token>)"`. The §8c-flagged path will set `gate_reasons = ARRAY['routine_declined_flagged', 'prefilter_H1' | 'prefilter_H2' | 'prefilter_H3']` so backstop audits can rerun the heuristic against historical data and measure false-positive rate. If precision drops below 90% on any heuristic over a 30-day window, `challenger_retro` should flag it for re-tuning.
+
+If ALL three checks pass → continue to step 5.
+
 ### 5. Research
 
 Use the WebSearch tool. Budget ≤6 searches. Aim for:
@@ -152,6 +255,15 @@ Produce a JSON object with these fields:
     },
     …   // ≥3 total
   ],
+  "structured_deliver_conditions": [
+    {
+      "id": "D1",
+      "description": "≥40 chars — what would observably resolve the thesis FAVORABLY (FDA approval letter posted, definitive merger 8-K filed, regulatory clearance, etc.)",
+      "observable": {"source_type": "edgar_8k_item_801", "search_pattern": "approved by the U.S. Food and Drug Administration"},
+      "date_bound": "2026-09-30"
+    },
+    …   // ≥1 total. Symmetric counterpart to structured_kill_conditions.
+  ],
   "confidence": "low" | "medium" | "high",
   "insufficient_signal": false,
   "insufficient_signal_reason": null,
@@ -162,15 +274,17 @@ Produce a JSON object with these fields:
 Rules:
 - **Tags:** ≥5 `[verified]`/`[inferred]`/`[speculated]` tags across situation+why_underpriced+steelman combined, with ≥1 `[verified]`. Untagged sentences containing numbers, proper nouns, or dates count as violations; >2 violations = hard fail.
 - **Boilerplate banned:** do NOT include the phrases "scanner classified signal_type", "tdnet filed", "auto-generated by", "placeholder thesis", "no thesis yet", "to be researched" — these match the regex and auto-fail the gate.
-- **Honest decline path:** if after research you can't produce a thesis that survives the steelman, set `insufficient_signal: true` with a terse reason (e.g. `"filer is shell — no tradable asymmetry"`). The job DLQs honestly. This is the preferred outcome over hedged prose.
+- **Honest decline path:** if after research you can't produce a thesis that survives the steelman, set `insufficient_signal: true` with a terse reason (e.g. `"filer is shell — no tradable asymmetry"`). The job promotes flagged (§6.5 → §8c-flagged), preserving operator visibility without polluting the active queue. This is the preferred outcome over hedged prose.
 
-### 6.5. Honest-decline short-circuit (before both gates)
+### 6.5. Honest-decline short-circuit (before both gates) → flagged-pass
 
-If the draft sets `confidence: "low"` OR `insufficient_signal: true`, **skip steps 6.8 and 7 entirely** and jump to step 8c with `final_reasons = ['routine_declined: <insufficient_signal_reason or confidence>']`. Do not re-draft; the model has already evaluated and declined. This is the fast path that keeps hedged prose out of either gate.
+If the draft sets `confidence: "low"` OR `insufficient_signal: true`, **skip steps 6.8 and 7 entirely** and jump to **step 8c-flagged** (NOT step 8c — that's the second-syntactic-failure DLQ path). The flagged-pass branch promotes the candidate to `state='watch'` with `extensions.routine_declined=true`, preserving the rendered dossier and audit trail without invoking either gate.
 
-Spec reference: §7.4 pseudocode — declines skip both the challenger and the syntactic gate; only gate-fails (step 8b) and challenge verdicts (step 8d) earn a retry.
+Spec reference: §7.4 pseudocode — declines skip both the challenger and the syntactic gate; only gate-fails (step 8b) and challenge verdicts (step 8d) earn a retry. As of this revision, declines no longer land in `thesis_drafting_failures` — they UPSERT a flagged candidate instead.
 
-**Structured decline_verdict (preserves audit trail without invoking the challenger).** Before jumping to 8c, append a `decline_verdict` object to `all_drafts[last]` in the same shape as `challenge_verdict` would have been:
+**Why flagged-pass instead of DLQ.** Operators want to see *what* the routine looked at and rejected, not just a count. A DLQ row in `thesis_drafting_failures` was hard to action: no dossier, no kill conditions, no catalyst — just prose. A flagged candidate row preserves the full structured output (dossier markdown, kill_conditions JSONB, catalyst date/window) plus the decline verdict, so an operator can override the flag with one click if their judgment differs. The flag gates auto-promotion to `active` (Stage A `candidate_aging` skips flagged rows; see [candidate_aging.md](./candidate_aging.md) §3) and is excluded from the daily-15 promotion quota (step 2 query).
+
+**Structured decline_verdict (preserves audit trail without invoking the challenger).** Before jumping to 8c-flagged, append a `decline_verdict` object to `all_drafts[last]` in the same shape as `challenge_verdict` would have been:
 
 ```json
 {
@@ -182,7 +296,7 @@ Spec reference: §7.4 pseudocode — declines skip both the challenger and the s
 }
 ```
 
-The drafter is the source of this verdict — the challenger routine was NOT invoked for declines. This is the formalized version of what was historically prose-only `final_reasons[0]='routine_declined: ...'`. `final_reasons` stays unchanged for backward compatibility; the structured object is the new audit trail. `challenger_retro` step 5 buckets `decline` verdicts on a 4th axis (over_decline / early_save / timing_save) tracked separately from miss/save metrics.
+The drafter is the source of this verdict — the challenger routine was NOT invoked for declines. This object is persisted into `candidates.extensions.decline_verdict` on the flagged-pass branch (no `thesis_drafting_failures` row anymore). `challenger_retro` step 5 buckets `decline` verdicts on a 4th axis (over_decline / early_save / timing_save) tracked separately from miss/save metrics.
 
 ### 6.8. Semantic gate — challenger pass (before syntactic gate)
 
@@ -203,7 +317,7 @@ Challenger output contract (structured JSON):
 Checks the challenger MUST run:
 
 - **Named asymmetry.** Is there a specific, numerical, or counterparty-level mispricing delta in `why_underpriced`? "Widely-watched deal with no named edge" = `kill` (ITRK archetype).
-- **Kill conditions observable.** Does each `structured_kill_conditions[i].observable.search_pattern` map to a concrete, publicly queryable data source? "Board changes its mind" without a filing-type anchor = `challenge` or `kill`.
+- **Kill / deliver conditions observable.** Does each `structured_kill_conditions[i].observable.search_pattern` AND each `structured_deliver_conditions[i].observable.search_pattern` map to a concrete, publicly queryable data source? "Board changes its mind" without a filing-type anchor = `challenge` or `kill`. Empty `structured_deliver_conditions` (zero entries) is itself a `challenge` — a thesis with only downside observables can never deliver mechanically and falls back to Claude judgment in candidate_aging Stage B (the very failure mode AXSM exposed on 2026-04-30).
 - **Steelman actually steelmans.** Is the bear case the strongest version, or a strawman? If the challenger's own `strongest_counter` is materially stronger than what's in `steelman` → `challenge`.
 - **Reasoning tags load-bearing.** Numbers + proper nouns + dates all tagged with a SPECIFIC basis (not just `[speculated]` on everything) → otherwise `challenge`.
 - **Catalyst date sourced.** Is `next_catalyst_date` grounded in a filing / calendar / regulator page, or inferred? If inferred without citation → `challenge`.
@@ -277,6 +391,8 @@ If either statement raises (non-200 from Modal, pg_net transport error, or colle
 **Before the UPSERT, compute the derived columns:**
 
 1. **`kill_conditions` JSONB** — take `thesis.structured_kill_conditions` and inject `"status": "pending"` into each element that doesn't already carry one. This is the full array stored on the candidate row; `candidate_aging` mutates it in place.
+
+1b. **`deliver_conditions` JSONB** — take `thesis.structured_deliver_conditions` (added 2026-05-08 for symmetry with kill_conditions) and inject `"status": "pending"` into each element. Same shape as kill_conditions; `candidate_aging` Stage B evaluates triggered entries to flip the candidate to `state='delivered'`. Empty array is permitted as a fallback for re-drafts of pre-2026-05-08 candidates that didn't have deliver_conditions, but a fresh draft from §6 should produce ≥1 entry per the schema.
 
 2. **Catalyst date → (date, window) pair** — parse `thesis.next_catalyst_date` and bind to `candidates.next_catalyst_date` (date) or `candidates.next_catalyst_window` (daterange). Exactly one is non-NULL per the `candidates_catalyst_exactly_one` CHECK.
    - `"YYYY-MM-DD"` → `next_catalyst_date = that date`, window NULL.
@@ -356,18 +472,22 @@ initial_state = "active" if catalyst_within_60d(
 `catalyst_within_60d(date, window)` returns True when the date is non-NULL and ≤ today+60d, OR when the window's lower bound ≤ today+60d AND its upper bound ≥ today. Symmetric check with the Stage A rule in [candidate_aging.md](./candidate_aging.md) §3.
 
 ```sql
--- Upsert candidate keyed on (ticker, mic)
+-- Upsert candidate keyed on (ticker, mic). Clean-promotion branch — confirmed
+-- challenger + passing syntactic gate. Strips any prior flagged-pass markers
+-- from extensions so a passing re-draft clears the routine_declined flag.
 INSERT INTO public.candidates (
   ticker, mic, entity_id, state, scoring_profile,
   current_score, current_band, dossier_markdown, dossier_storage_path,
-  kill_conditions,
+  kill_conditions, deliver_conditions,
   next_catalyst_date, next_catalyst_window,
+  extensions,
   thesis_approved_at, last_aging_evaluated_at
 ) VALUES (
   $ticker, $mic, $entity_id, $initial_state, $scoring_profile,
   $score_with_bonus, $band_with_bonus, $markdown, $storage_path,
-  $kill_conditions_jsonb,
+  $kill_conditions_jsonb, $deliver_conditions_jsonb,
   $next_catalyst_date, $next_catalyst_window,
+  '{}'::jsonb,
   now(), now()
 )
 ON CONFLICT (ticker, mic) DO UPDATE SET
@@ -376,15 +496,22 @@ ON CONFLICT (ticker, mic) DO UPDATE SET
   current_score = EXCLUDED.current_score,
   current_band = EXCLUDED.current_band,
   kill_conditions = EXCLUDED.kill_conditions,
+  deliver_conditions = EXCLUDED.deliver_conditions,
   next_catalyst_date = EXCLUDED.next_catalyst_date,
   next_catalyst_window = EXCLUDED.next_catalyst_window,
+  extensions = (COALESCE(public.candidates.extensions, '{}'::jsonb)
+                 - 'routine_declined'
+                 - 'routine_decline_reason'
+                 - 'declined_at'
+                 - 'declined_by'
+                 - 'decline_verdict'),
   thesis_approved_at = EXCLUDED.thesis_approved_at,
   last_aging_evaluated_at = EXCLUDED.last_aging_evaluated_at,
   updated_at = now()
 RETURNING id, (xmax = 0) AS was_inserted;
 ```
 
-**Re-draft caveat.** The UPDATE branch intentionally does NOT touch `state` — a convergence re-draft shouldn't promote a candidate that's currently `killed`/`delivered`, and shouldn't silently demote an already-`active` one. Initial-state computation applies only to the INSERT path; `candidate_aging` owns all subsequent transitions.
+**Re-draft caveat.** The UPDATE branch intentionally does NOT touch `state` — a convergence re-draft shouldn't promote a candidate that's currently `killed`/`delivered`, and shouldn't silently demote an already-`active` one. Initial-state computation applies only to the INSERT path; `candidate_aging` owns all subsequent transitions. The `extensions` strip IS applied on UPDATE, however — a passing re-draft of a previously-flagged candidate should clear the flag, since the new draft survived both gates and the prior decline is no longer load-bearing.
 
 `was_inserted` picks the event_type for the next write: **`'created'` on insert, `'thesis_drafted_by_claude'` on update** (convergence re-draft). Both types are in the fanout webhook's email-triggering set ([fanout/index.ts:101](supabase/functions/fanout/index.ts)); `thesis_updated` is NOT — do not use it here or re-drafts will send no notification.
 
@@ -439,7 +566,9 @@ UPDATE public.thesis_jobs SET
 WHERE id = $job_id;
 ```
 
-### 8c. Second syntactic failure OR `confidence: low` OR `insufficient_signal: true` → DLQ
+### 8c. Second syntactic failure OR challenger `challenge`-2nd OR `kill` → DLQ
+
+This branch is reserved for **gate failures** — second syntactic-gate fail, exhausted challenger budget, or challenger `kill`. Honest declines (`confidence: low` / `insufficient_signal: true`) DO NOT come here anymore — they take §8c-flagged.
 
 ```sql
 INSERT INTO public.thesis_drafting_failures (
@@ -458,13 +587,100 @@ WHERE id = $job_id;
 
 `all_drafts_jsonb` is an array of `{draft, gate_verdict, challenge_verdict}` triples — one per attempt — so the DLQ row captures the full adversarial trail for Pedro's audit. `alerted` is `false` because no email fires on a DLQ. Per the 2026-04-20 email-gating directive (memory `email_alert_gating.md`), raw `alerts.INSERT` is audit-only ([fanout/index.ts:89-94](supabase/functions/fanout/index.ts)); email only fires on `candidate_events` with `event_type='created' | 'thesis_drafted_by_claude'`, which a DLQ never produces. The dashboard surfaces DLQ'd rows as "needs manual thesis" — that is the notification path.
 
+### 8c-flagged. Honest decline (§6.5) → promote-flagged
+
+This is the path taken from §6.5 when the drafter self-declines (`confidence: "low"` OR `insufficient_signal: true`). Both gates skipped; both retry budgets untouched; promotion quota NOT consumed.
+
+**Render dossier + upload first** — same four-call `rpc_*` chain as §8a step 3 (render enqueue → render collect → upload enqueue → upload collect). Operators want to see the research the routine looked at and rejected, not a blank row. The dossier must include the `decline_verdict` block from §6.5 as a clearly-marked footer; the renderer (`render_candidate_markdown_v2`) already supports this when `extensions.routine_declined=true` is in the candidate row's payload.
+
+**Compute the flag JSONB** before the UPSERT:
+
+```python
+flag_extensions = {
+    "routine_declined": True,
+    "routine_decline_reason": (
+        thesis.get("insufficient_signal_reason")
+        or f"confidence:{thesis['confidence']}"
+    ),
+    "declined_at": now_iso,
+    "declined_by": "thesis_writer",          # or "signal_resolver" on the inline-draft branch
+    "decline_verdict": decline_verdict_obj,  # the §6.5 structured block
+}
+```
+
+**UPSERT with `state='watch'` (always — flagged rows never start `active`):**
+
+```sql
+INSERT INTO public.candidates (
+  ticker, mic, entity_id, state, scoring_profile,
+  current_score, current_band, dossier_markdown, dossier_storage_path,
+  kill_conditions, deliver_conditions,
+  next_catalyst_date, next_catalyst_window,
+  extensions,
+  thesis_approved_at, last_aging_evaluated_at
+) VALUES (
+  $ticker, $mic, $entity_id, 'watch', $scoring_profile,
+  $score_with_bonus, $band_with_bonus, $markdown, $storage_path,
+  $kill_conditions_jsonb, $deliver_conditions_jsonb,
+  $next_catalyst_date, $next_catalyst_window,
+  $flag_extensions_jsonb,
+  now(), now()
+)
+ON CONFLICT (ticker, mic) DO UPDATE SET
+  -- Preserve everything but merge the flag in. Don't overwrite a previously
+  -- clean candidate's state/score/dossier with a re-decline; just add the flag
+  -- so operators see the routine reconsidered and declined again.
+  extensions = COALESCE(public.candidates.extensions, '{}'::jsonb)
+                || EXCLUDED.extensions,
+  last_aging_evaluated_at = EXCLUDED.last_aging_evaluated_at,
+  updated_at = now()
+RETURNING id, (xmax = 0) AS was_inserted;
+```
+
+**`candidate_events` write — payload carries `routine_declined: true` so email triggers can filter:**
+
+```sql
+INSERT INTO public.candidate_events (candidate_id, event_type, payload)
+VALUES ($candidate_id,
+        CASE WHEN $was_inserted THEN 'created'
+             ELSE 'thesis_drafted_by_claude' END,
+        jsonb_build_object(
+          'source', 'thesis_writer',
+          'thesis_job_id', $job_id,
+          'signal_id', $signal_id,
+          'thesis', $thesis_jsonb,
+          'drafts', $all_attempts_jsonb,
+          'routine_declined', true,
+          'decline_verdict', $decline_verdict_jsonb,
+          'drafter_session_id', $your_session_id
+        ));
+```
+
+**Email gating.** The fanout edge function ([supabase/functions/fanout/index.ts](supabase/functions/fanout/index.ts)) must skip events where `payload->>'routine_declined' = 'true'`. This is the second authoritative email gate (the first being the post-AI-review pre-edge promotion check from `email_alert_gating.md`); both must be in place — flagged candidates fire the `candidate_events` insert by design (so operators see them on `/candidates`) but must not page anyone.
+
+**Close the job as `promoted` with the flag marker:**
+
+```sql
+UPDATE public.thesis_jobs SET
+  status = 'promoted',
+  candidate_id = $candidate_id,
+  drafted_thesis = $thesis_jsonb,
+  gate_reasons = ARRAY['routine_declined_flagged'],
+  completed_at = now()
+WHERE id = $job_id;
+```
+
+The `gate_reasons=['routine_declined_flagged']` marker is what the §2 quota query filters on to exclude this row from the daily-15 cap. It is also what `challenger_retro` uses to bucket flagged-pass declines on its 4th axis.
+
+**No `thesis_drafting_failures` row** is written on this branch — the candidate row IS the audit record. This intentionally diverges from the pre-revision behavior; historical `thesis_drafting_failures` rows with `final_reasons[1] LIKE 'routine_declined%'` are stale-but-preserved (resolve them by manual dismissal on the dashboard if the corresponding candidate now exists).
+
 ### 8d. Challenger verdict = `challenge` — retry once
 
 Collect the challenger's `required_fixes` + `strongest_counter`. Re-enter step 6 with a semantic corrective prompt distinct from the syntactic one (step 8b):
 
 > "Prior draft drew a `challenge` verdict from the semantic reviewer. The reviewer's strongest counter-argument was: '$STRONGEST_COUNTER'. Required fixes: $REQUIRED_FIXES. Address these specifically — either by strengthening the `why_underpriced` asymmetry claim, tightening the `steelman` to actually engage the strongest counter, or declining with `confidence: 'low'` if the claim can't be defended."
 
-The retry MAY land as an honest decline (step 6.5 short-circuit) — that's a preferred outcome when the challenger identified a structural weakness. Set:
+The retry MAY land as an honest decline (step 6.5 short-circuit → §8c-flagged promote) — that's a preferred outcome when the challenger identified a structural weakness; the candidate ships flagged for operator review rather than DLQ'ing. Set:
 
 ```sql
 UPDATE public.thesis_jobs SET
@@ -510,7 +726,8 @@ After step 6.8 (challenger) and step 7 (syntactic gate), the two verdicts combin
 | `challenge`, 1st | — | Retry challenger (step 8d) — skip syntactic gate this turn |
 | `challenge`, 2nd | — | DLQ `final_reasons=[challenger_challenge_exhausted, ...]` (step 8c-style) |
 | `kill` | — | DLQ `final_reasons=[challenger_kill, ...]` (step 8e) — skip retry, skip syntactic gate |
-| — | — (honest decline) | DLQ `final_reasons=[routine_declined, ...]` (step 6.5 → 8c) — skip both gates |
+| — | — (honest decline) | **Promote-flagged** (`extensions.routine_declined=true`, `state='watch'`, gate_reasons=['routine_declined_flagged'], no quota consumed, no email) (step 6.5 → 8c-flagged) — skip both gates |
+| — | — (pre-filter decline) | **Promote-flagged** with `gate_reasons=['routine_declined_flagged','prefilter_H1'\|'prefilter_H2'\|'prefilter_H3']`, `extensions.decline_verdict.prefilter_check` set (step 4.5 → 6.5 → 8c-flagged) — skip research, draft, both gates |
 
 The challenger runs BEFORE the syntactic gate (step 6.8 before step 7). A `kill` from the challenger short-circuits the syntactic gate entirely — no point paying for char-count validation on a structurally dead thesis.
 
@@ -543,12 +760,33 @@ RLS is enabled on every table; the Supabase MCP talks as service_role so bypass 
 
 Before emitting `{status: 'promoted'}` for a job, verify:
 
-- [ ] Challenger returned `verdict: "confirm"` (skipped only if step 6.5 short-circuited on `confidence:"low"` / `insufficient_signal`).
-- [ ] Syntactic gate returned `{ok: true, reasons: []}` from `assess_thesis_v2` (same skip condition).
+**Clean-promote branch** (challenger=confirm, gates passed):
+
+- [ ] Challenger returned `verdict: "confirm"`.
+- [ ] Syntactic gate returned `{ok: true, reasons: []}` from `assess_thesis_v2`.
 - [ ] `candidates` row exists with your `candidate_id` AND has non-empty `kill_conditions`, non-NULL `(next_catalyst_date OR next_catalyst_window)`, and `thesis_approved_at = last_aging_evaluated_at = now()` on first creation.
+- [ ] `candidates.extensions` does NOT contain `routine_declined` (the §8a UPSERT strips it on UPDATE).
 - [ ] `candidate_events` row with `event_type='created'` (first insert) or `'thesis_drafted_by_claude'` (convergence re-draft) exists — NOT `'thesis_updated'`, which doesn't fire the email.
-- [ ] `thesis_jobs.status = 'promoted'`, `completed_at` is set, `candidate_id` is set, `challenge_count ≥ 1` (exactly 1 on happy path).
+- [ ] `thesis_jobs.status = 'promoted'`, `gate_reasons IS NULL`, `completed_at` is set, `candidate_id` is set, `challenge_count ≥ 1` (exactly 1 on happy path).
 - [ ] `dossier_storage_path` points at a Storage object you actually PUT.
 - [ ] `all_drafts` in the outgoing `candidate_events.payload.drafts` preserves each attempt as `{draft, gate_verdict, challenge_verdict}` so the adversarial trail is recoverable.
 
-Emit a summary line per job: `"<job_id>: promoted ticker.mic (score X→Y, band Y, challenger=confirm)"` or `"<job_id>: dlq (<terse reason>, challenge_count=N)"`.
+**Flagged-pass branch** (§6.5 short-circuit on `confidence:"low"` / `insufficient_signal`):
+
+- [ ] Both gates SKIPPED (no challenger invocation, no `assess_thesis_v2` call).
+- [ ] `candidates` row exists with `state='watch'` AND `extensions->>'routine_declined' = 'true'` AND `extensions ? 'decline_verdict'`.
+- [ ] `candidate_events` row event_type is `'created'` or `'thesis_drafted_by_claude'`, payload contains `routine_declined: true` so fanout filters skip it.
+- [ ] `thesis_jobs.status = 'promoted'`, `gate_reasons = ARRAY['routine_declined_flagged']`, `completed_at` set.
+- [ ] No `thesis_drafting_failures` row was written for this job.
+- [ ] `dossier_storage_path` points at a Storage object (operators read the research even when flagged).
+- [ ] `all_drafts[last]` contains a `decline_verdict` object (drafter-sourced, no challenger invocation).
+
+**Pre-filter-decline branch** (§4.5 short-circuit on H1/H2/H3):
+
+- [ ] No research, no draft Claude call, no challenger invocation, no `assess_thesis_v2` call. The only Claude work was the pre-filter SQL + verdict synthesis.
+- [ ] `candidates` row exists with `state='watch'` AND `extensions->>'routine_declined' = 'true'` AND `extensions->'decline_verdict'->>'prefilter_check' IN ('H1','H2','H3')`.
+- [ ] `thesis_jobs.gate_reasons` contains both `'routine_declined_flagged'` AND `'prefilter_H1'|'prefilter_H2'|'prefilter_H3'`.
+- [ ] `attempt_count` did NOT increment beyond the step 3 claim (no retry budget consumed).
+- [ ] `challenge_count = 0` (challenger never invoked).
+
+Emit a summary line per job: `"<job_id>: promoted ticker.mic (score X→Y, band Y, challenger=confirm)"` for clean promotes, `"<job_id>: flagged ticker.mic (routine_declined: <reason>)"` for §6.5 flagged-passes, `"<job_id>: prefilter_decline ticker.mic (H<n>: <reason_token>)"` for §4.5 pre-filter declines, or `"<job_id>: dlq (<terse reason>, challenge_count=N)"` for gate-failure DLQs.

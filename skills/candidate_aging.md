@@ -53,17 +53,21 @@ The `stage='B'` filter is load-bearing. Stage A inserts stamp `stage:'A'` in the
 
 For each candidate, in order, check these rules. First match wins:
 
-- **Promote watch → active (2026-04-22 amendment).** `state='watch'` AND catalyst lands in the next 60 days — meaning EITHER:
-  - `next_catalyst_date IS NOT NULL AND next_catalyst_date <= now() + interval '60 days' AND next_catalyst_date >= now() - interval '7 days'`, OR
-  - `next_catalyst_window && tstzrange(now(), now() + interval '60 days', '[]')`.
+- **Promote watch → active (2026-04-22 amendment; routine_declined gate added 2026-04-27).** `state='watch'` AND `extensions->>'routine_declined' IS DISTINCT FROM 'true'` AND catalyst lands in the next 60 days — meaning EITHER:
+  - `next_catalyst_date IS NOT NULL AND next_catalyst_date <= current_date + 60 AND next_catalyst_date >= current_date - 7`, OR
+  - `next_catalyst_window && daterange(current_date, current_date + 60, '[]')`.
 
-  Challenger thesis approval is implicit for every `watch` row — thesis_writer only promotes after a `confirm` verdict ([thesis_writer.md:468](./thesis_writer.md)) — so catalyst proximity is the only remaining gate. Then:
+  Note: `next_catalyst_date` is `date` and `next_catalyst_window` is `daterange`. Use `current_date` arithmetic (not `now()` + interval), and compose overlap literals with `daterange(...)`, not `tstzrange(...)`. A `daterange && tstzrange` expression raises `operator does not exist` and silently fails the whole Stage A predicate for every run of this skill.
+
+  **`routine_declined` gate.** Candidates flagged via the §6.5 honest-decline branch in [thesis_writer.md](./thesis_writer.md) (`extensions.routine_declined=true`) MUST NOT auto-promote — they require an operator to affirmatively clear the flag first. Otherwise a routine that already self-rejected the thesis would still ship the candidate to `active` simply because the catalyst approached, defeating the point of the flag. The dashboard surfaces the flag visually so operators can clear it from the candidate detail view.
+
+  Challenger thesis approval is implicit for every clean `watch` row — thesis_writer only promotes via §8a after a `confirm` verdict ([thesis_writer.md](./thesis_writer.md)) — so catalyst proximity AND absence of the routine_declined flag are the only remaining gates. Then:
   - SET `candidates.state = 'active'`, `last_aging_evaluated_at = now()`.
   - INSERT `candidate_events(event_type='state_changed', payload={from:'watch', to:'active', reason:'catalyst_within_60d', source:'candidate_aging', stage:'A'})`.
   - No `outcomes` row (not a terminal state).
   - Move to next candidate. No Claude call.
 
-  The lower bound (`next_catalyst_date >= now() - interval '7 days'`) excludes catalysts that already elapsed — those belong to the "elapsed catalyst" Stage B flag below, not to promotion. `tstzrange && ` already handles elapsed windows naturally.
+  The lower bound (`next_catalyst_date >= current_date - 7`) excludes catalysts that already elapsed — those belong to the "elapsed catalyst" Stage B flag below, not to promotion. `daterange && ` already handles elapsed windows naturally.
 
   `thesis_writer` also applies this same rule inline at creation time, so most eligible candidates land in `active` directly without ever sitting in `watch`. This rule catches the rest: (a) candidates whose catalyst was >60d out at creation but has since approached, (b) candidates whose catalyst was added or refined after initial drafting.
 
@@ -76,8 +80,8 @@ For each candidate, in order, check these rules. First match wins:
   - Move to next candidate. No Claude call.
 
 - **Stale active, no near catalyst.** `state='active'` AND `updated_at < now() - interval '30 days'` AND "no near catalyst" — meaning BOTH:
-  - (`next_catalyst_date IS NULL` OR `next_catalyst_date > now() + interval '60 days'`) AND
-  - (`next_catalyst_window IS NULL` OR NOT (`next_catalyst_window && tstzrange(now(), now() + interval '60 days', '[]')`)).
+  - (`next_catalyst_date IS NULL` OR `next_catalyst_date > current_date + 60`) AND
+  - (`next_catalyst_window IS NULL` OR NOT (`next_catalyst_window && daterange(current_date, current_date + 60, '[]')`)).
 
   Then:
   - SET `candidates.state = 'watch'`, `last_aging_evaluated_at = now()`.
@@ -87,11 +91,27 @@ For each candidate, in order, check these rules. First match wins:
 
   The 60-day catalyst threshold is symmetric with the promote rule above — a candidate oscillating between `active` and `watch` day-to-day is a symptom of asymmetric thresholds and would burn auditor attention. Both predicates (date AND window) are needed: the `candidates_catalyst_exactly_one` CHECK constraint permits one of `(next_catalyst_date, next_catalyst_window)` to be non-NULL. Ignoring the window demotes candidates with a near window (e.g., `Q2 2026` = `[2026-04-01, 2026-06-30]` and a NULL date).
 
-- **Elapsed catalyst — flag for Stage B, DO NOT exit.** `state='active'` AND catalyst actually elapsed — meaning EITHER:
-  - `next_catalyst_date IS NOT NULL AND next_catalyst_date < now() - interval '7 days'`, OR
-  - `next_catalyst_window IS NOT NULL AND upper(next_catalyst_window) < now() - interval '7 days'`.
+- **Deterministic catalyst-elapsed demote (2026-05-08 amendment, fixes AXSM-class stickiness).** `state='active'` AND catalyst elapsed by more than 7 days — meaning EITHER:
+  - `next_catalyst_date IS NOT NULL AND next_catalyst_date < current_date - 7`, OR
+  - `next_catalyst_window IS NOT NULL AND upper(next_catalyst_window) < current_date - 7`.
 
-  Then verify no convergence signals referencing the catalyst in the recent window (use the profile-aware window from step 4). Mark `catalyst_elapsed=true` in the Stage B payload and continue.
+  Then verify NO terminal transition has been recorded in the elapsed window (no `candidate_events` row with `payload->>'source' IN ('pre_edge_monitor','dashboard') AND event_type='state_changed' AND created_at >= next_catalyst_date - 1d`) AND no fresh `next_catalyst_date` was written since the elapsed one (i.e., the date hasn't been re-set forward).
+
+  **Foreign-agency guard.** Skip this deterministic demote and continue to Stage B if `scoring_profile <> 'binary_catalyst'` OR `extensions->>'catalyst_jurisdiction' NOT IN (NULL, 'US-FDA', 'us-fda', 'fda')`. Foreign-agency PDUFA-equivalents (EMA, PMDA, NMPA) routinely arrive 7-14d after a target date; the existing 30d `stale_active_no_near_catalyst` rule covers those.
+
+  Then:
+  - SET `candidates.state = 'watch'`, `last_aging_evaluated_at = now()`.
+  - INSERT `candidate_events(event_type='state_changed', payload={from:'active', to:'watch', reason:'catalyst_elapsed_no_resolution', source:'candidate_aging', stage:'A', elapsed_days:<int>, catalyst_date:<iso>})`.
+  - No `outcomes` row (state=watch is not terminal).
+  - Move to next candidate. No Claude call.
+
+  **Why this is mechanical, not Stage-B discretion.** Prior to 2026-05-08 the elapsed-catalyst case flagged Stage B and let the Claude evaluator decide between `demote_to_watch`/`maintain`/`kill`/`deliver`. AXSM was elapsed for 8 days with five consecutive `maintain` decisions despite all Stage B `demote_to_watch` conditions holding. Adding more guidance won't fix evaluator drift. Deterministic rules don't drift.
+
+- **Recent elapsed catalyst — flag for Stage B, DO NOT exit.** `state='active'` AND catalyst elapsed by 1-7 days — meaning EITHER:
+  - `next_catalyst_date IS NOT NULL AND next_catalyst_date < current_date - 1 AND next_catalyst_date >= current_date - 7`, OR
+  - `next_catalyst_window IS NOT NULL AND upper(next_catalyst_window) < current_date - 1 AND upper(next_catalyst_window) >= current_date - 7`.
+
+  This window (T+1 to T+7) is where new resolution signals are most likely to land and where Claude judgment over filings/press releases adds value. Mark `catalyst_elapsed=true` in the Stage B payload and continue. Stage B's `demote_to_watch` guidance applies here but is no longer the only path off — the deterministic rule above guarantees demotion by T+8 if Stage B keeps choosing `maintain`.
 
 - **None of the above.** Continue to Stage B with `catalyst_elapsed=false`.
 
@@ -127,9 +147,9 @@ SELECT … FROM public.signals WHERE entity_id = $candidate.entity_id
   AND scan_date >= now() - (interval '1 day' * $window_days) ORDER BY scan_date DESC
 ```
 
-### 5. Stage B — Claude-mediated kill-condition evaluation
+### 5. Stage B — Claude-mediated kill-condition + deliver-condition evaluation
 
-Using the candidate's `dossier_markdown`, `kill_conditions` (structured), and the recent-signals payload from step 4, evaluate each kill condition AND decide an overall recommendation.
+Using the candidate's `dossier_markdown`, `kill_conditions` (structured) AND `deliver_conditions` (structured, added 2026-05-08), and the recent-signals payload from step 4, evaluate each kill condition AND each deliver condition AND decide an overall recommendation.
 
 Produce a JSON object:
 
@@ -145,23 +165,35 @@ Produce a JSON object:
     },
     …   // one entry per kill_condition in the candidate; omitted entries are treated as unchanged
   ],
+  "deliver_condition_updates": [
+    {
+      "id": "D1",
+      "new_status": "pending" | "triggered" | "cleared",
+      "evidence_url": "https://… (required when new_status='triggered'; must be a source_url from the recent-signals payload)",
+      "evidence_ts": "YYYY-MM-DDTHH:MM:SSZ (required with evidence_url; use the matching signal's scan_date)",
+      "reasoning": "≥40 chars. Must quote or closely paraphrase the matched content."
+    },
+    …   // one entry per deliver_condition in the candidate; omitted entries are treated as unchanged. Empty array if the candidate has no deliver_conditions yet (legacy rows pre-2026-05-08).
+  ],
   "recommendation": "kill" | "demote_to_watch" | "deliver" | "maintain",
   "recommendation_reasoning": "≥40 chars. Explains the state transition (or the maintain decision)."
 }
 ```
 
+**Recommendation precedence (kill > deliver > demote > maintain).** A kill triggered AND a deliver triggered in the same window means the thesis was killed before its delivery — kill wins. A clean deliver with no kill triggered → recommend `deliver`. Falling through to `demote_to_watch` requires `catalyst_elapsed=true` AND no kill/deliver triggered. Default `maintain` when none of the above apply.
+
 Decision guidance:
 
 - **`kill`** — at least one kill_condition became `triggered` this run AND the triggered condition implies the thesis is dead (not just "one edge got crowded"). Use it for clean outright kills (board rejection, FDA CRL, deal breakup).
-- **`deliver`** — the primary catalyst resolved favorably; the thesis played out. Examples: FDA approval on PDUFA, deal closes, proxy fight wins. Use this sparingly; most catalysts are ambiguous and warrant `maintain` + demotion.
-- **`demote_to_watch`** — `state='active'` with `catalyst_elapsed=true` from Stage A, no new kill fired, no new catalyst on the horizon. Not dead; just past-prime without a reason to keep actively watching.
-- **`maintain`** — default. Kill conditions still `pending`, catalyst still live, candidate still has edge.
+- **`deliver`** — at least one deliver_condition became `triggered` this run (and survived the challenger + regex gate at step 5.5/6) AND no kill_condition triggered in the same run. Examples: FDA approval letter posted, deal close 8-K filed, regulatory clearance announced. As of 2026-05-08 this is now triggered structurally via `structured_deliver_conditions`, not by Claude judgment alone — the prior "use sparingly" guidance was load-bearing for the AXSM-stuck-active failure mode.
+- **`demote_to_watch`** — `state='active'` with `catalyst_elapsed=true` from Stage A (1-7d post-catalyst band only, since Stage A force-demotes >7d), no kill or deliver triggered, no new catalyst on the horizon. Not dead; just past-prime without resolution evidence yet. The deterministic Stage A rule covers >7d cases mechanically.
+- **`maintain`** — default for live catalysts (not yet elapsed). Kill conditions still `pending`, deliver conditions still `pending`, catalyst still ahead, candidate still has edge.
 
 ### 5.5. Semantic gate — challenger pass on every `triggered` claim
 
-Before the regex integrity check (step 6) commits any `new_status='triggered'`, invoke the **challenger routine** — the same adversarial Claude app routine used by `thesis_writer` (step 6.8), but reframed for aging: "is the matched signal load-bearing for this kill condition, or is it a cosmetic pattern hit?"
+Before the regex integrity check (step 6) commits any `new_status='triggered'` (in either `kill_condition_updates` or `deliver_condition_updates`), invoke the **challenger routine** — the same adversarial Claude app routine used by `thesis_writer` (step 6.8), but reframed for aging: "is the matched signal load-bearing for this condition, or is it a cosmetic pattern hit?"
 
-The challenger receives: the candidate's thesis (`dossier_markdown` + structured `kill_conditions[id=K]`), the full `raw_payload` of the signal being cited as evidence, the original `observable.search_pattern`, and `caller_spec_sha` (sha256 of `.claude/skills/thesis_challenger.md` as observed by this skill — `sha256sum .claude/skills/thesis_challenger.md | cut -d' ' -f1`). It returns:
+The challenger receives: the candidate's thesis (`dossier_markdown` + structured `kill_conditions[id=K]` OR `deliver_conditions[id=D]`), the full `raw_payload` of the signal being cited as evidence, the original `observable.search_pattern`, and `caller_spec_sha` (sha256 of `.claude/skills/thesis_challenger.md` as observed by this skill — `sha256sum .claude/skills/thesis_challenger.md | cut -d' ' -f1`). It returns:
 
 ```json
 {
@@ -192,9 +224,9 @@ The challenger's full JSON verdict is preserved in `candidate_aging_failures.rou
 
 ### 6. Integrity defense — verify every `triggered` before commit
 
-For each update in `kill_condition_updates` with `new_status='triggered'`:
+For each update in `kill_condition_updates` AND `deliver_condition_updates` with `new_status='triggered'`:
 
-1. Look up the original kill_condition from `candidates.kill_conditions` by `id`. Extract `observable.search_pattern`.
+1. Look up the original condition from `candidates.kill_conditions` (for K-prefixed ids) or `candidates.deliver_conditions` (for D-prefixed ids) by `id`. Extract `observable.search_pattern`.
 2. Match the claimed `evidence_url` to a signal in the step-4 payload. Fetch that signal's `raw_payload` + `source_url`.
 3. Run the Python regex via `public.rpc_regex_check` (case-insensitive unless the pattern already embeds inline flags in its first 5 chars, e.g. `(?i)`). The RPC POSTs to a Modal endpoint (`modal_workers/app.py::regex_check_endpoint`) that uses Python `re.search` with identical flag-detection to the old bash path. This replaces the `python3 -c ...` shell-out broken by the Cowork Linux sandbox outage of 2026-04-22.
 
@@ -277,16 +309,17 @@ Repeat the regex check for every `triggered` entry. Only commit updates that pas
 
 ### 7. Apply the decision (one transaction per candidate)
 
-Compute the new `kill_conditions` JSONB by merging the verified updates into the existing array (status changes only; other fields preserved).
+Compute the new `kill_conditions` AND `deliver_conditions` JSONB by merging the verified updates from each respective array into the existing arrays (status changes only; other fields preserved). Empty `deliver_conditions` (legacy candidate, pre-2026-05-08) means there's nothing to merge for the deliver side — leave it as `[]`.
 
 Statement ordering matters: if the Supabase MCP's `execute_sql` doesn't wrap this block in a single transaction (untested in this codebase), a crash between statements could leave the candidate half-updated. The order below keeps `last_aging_evaluated_at` as the LAST write — its absence is the idempotency guard (step 1 skips rows already evaluated today). On partial failure, the next run picks the candidate back up rather than skipping.
 
 ```sql
 BEGIN;
 
--- 1. Update the row's kill_conditions + (optional) state. NO last_aging_evaluated_at yet.
+-- 1. Update the row's kill_conditions + deliver_conditions + (optional) state. NO last_aging_evaluated_at yet.
 UPDATE public.candidates
-SET kill_conditions = $updated_kill_conditions
+SET kill_conditions = $updated_kill_conditions,
+    deliver_conditions = $updated_deliver_conditions
 WHERE id = $candidate_id;
 
 -- If recommendation changes state:
@@ -307,7 +340,9 @@ INSERT INTO public.candidate_events (candidate_id, event_type, payload) VALUES (
     'to', $new_state,
     'reason', $recommendation_reasoning,
     'triggered_kill_id', $first_triggered_kill_id_or_null,
-    'kill_condition_updates', $verified_updates_jsonb,
+    'triggered_deliver_id', $first_triggered_deliver_id_or_null,
+    'kill_condition_updates', $verified_kill_updates_jsonb,
+    'deliver_condition_updates', $verified_deliver_updates_jsonb,
     'evaluator_session_id', $your_session_id
   )
 );

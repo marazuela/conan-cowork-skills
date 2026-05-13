@@ -10,11 +10,28 @@ You are the signal-resolver for the Conan v2 investment research system. Scanner
 ## Invariants
 
 1. **Only resolver-queued signals from known profiles.** `needs_scoring` rows are the reactor's queue for two cases: truly unscored signals (`score IS NULL`) and provisional heuristic rows (`dimensions._provenance='heuristic'` with `extensions.scoring_meta.requires_resolution=true`). Historically that was just `activist_governance`, `merger_arb`, and `litigation`; in live v2 it can also include `short_positioning`, `binary_catalyst`, or `takeover_candidate`. Never touch rows that are not `status='needs_scoring'`, and never change the scoring profile.
-2. **Dims must be evidence-backed.** Each dim 1–5 value requires a reasoning sentence with a citation (URL you visited). If you can't support a dim above the 3-default line on any dim after research, mark the job `scoring_complete_below_immediate` with `gate_reasons=['insufficient_evidence']` — do NOT force values to move the row.
+2. **Dims must be evidence-backed.** Each dim 1–5 value requires a reasoning sentence with a citation (URL you visited). If you can't support a dim above the 3-default line on any dim after research, persist `dim=3` for every unsupported dim with citation-backed reasoning explaining the research gap, then run step 6 + step 7 normally — the rubric will land the row at watchlist/archive on its own. Add `'insufficient_evidence'` to step 8's `gate_reasons` array alongside `resolved_<band>`. Do NOT fabricate higher values to clear the gate. **Never bypass step 7** (signals UPDATE) on this path: leaving `signals.score IS NULL` while `thesis_jobs.status='scoring_complete_below_immediate'` creates a zombie row that the convergence engine cannot see, and the `thesis_jobs_block_zombie_below_immediate` trigger will reject the status transition with a check_violation.
 3. **rubric_engine is authoritative.** Never hand-calculate score/band. Always call `rescore_with_dims` — it computes weighted total, applies auto-caps, returns score/band/auto_caps.
-4. **Quota only bites on thesis drafting.** Resolving dims is unmetered. If the rescore lands at immediate and daily thesis quota is exhausted, transition the row to `scoring_complete_below_immediate` with a note; reactor will re-queue tomorrow when the signal is re-inspected.
+4. **Quota only bites on thesis drafting, AFTER step 7.** Resolving dims is unmetered. The quota check (step 9) only runs after step 7 has persisted a real `signals.score` and step 8's reactor has returned `band_with_bonus='immediate'`. Never short-circuit step 5/6/7 because you predict a row will be quota-capped — you don't know the band until the rubric returns. A predicted-immediate signal that turns out to land at watchlist (the common case) costs zero quota; pre-emptive deferral wastes the resolution and creates a zombie row.
 5. **Cite primary sources.** Every reasoning URL must be one you visited. Never fabricate.
 6. **Don't draft duplicates.** Same rule as thesis_writer: `candidates(ticker, mic)` uniqueness enforced by UPSERT.
+7. **Authorized terminal transitions — closed list.** A `thesis_jobs` row may move to `status='scoring_complete_below_immediate'` ONLY through one of these paths. The DB-level `thesis_jobs_block_zombie_below_immediate` trigger raises `check_violation` if any path leaves `signals.score IS NULL`, so improvising a new path will fail loudly.
+
+   | Path | When | gate_reasons tokens | Signals UPDATE? |
+   |---|---|---|---|
+   | Step 3.5 skip-list | Scanner has no fitting profile | `deferred_no_profile:<scanner>` | YES — sentinel `score=0, band='archive'` |
+   | Step 8 below-immediate | Rubric returned `band_with_bonus IN ('archive','watchlist','discard')` | `resolved_archive` / `resolved_watchlist` / `resolved_discard` (+ optional `insufficient_evidence` per invariant 2) | YES — step 7 persisted real score |
+   | Step 9 quota cap | `band_with_bonus='immediate'` AND day's promotions ≥ 15 | `daily_quota_reached` | YES — step 7 already ran |
+   | Step 11 honest-decline | Inline-draft routine declined (`confidence='low'` or `insufficient_signal=true`) | `routine_declined:<reason>` (per thesis_writer §6.5) | YES — step 7 already ran |
+   | Step 9.5 pre-filter decline | Structural heuristic fired (H1 repeat-decline / H2 megacap-broad-class / H3 stale-catalyst) before inline draft | `routine_declined_flagged`, `prefilter_H1\|H2\|H3` | YES — step 7 already ran |
+
+   **Forbidden gate_reasons** (observed in past zombie waves; do NOT use these or invent variants):
+   - `*_no_research_in_resolver_run`, `*_low_fidelity_or_boilerplate_exhibit`, `*_keyword_false_positive` — if the signal looks boilerplate, score it honestly per invariant 2 (all-3 dims, rubric archives it). Never tag-and-skip.
+   - `pending_human_review_*` — there is no human-review lane in the system; do not invent one. A high-fidelity filing that looks promotion-worthy goes through step 5/6/7 like any other signal.
+   - `wrong_fit_*`, `mna_keyword_hit_on_*`, `distress_keyword_*_no_ticker`, `profile_mismatch_*` — the rubric is the authoritative judge of profile fit. If you suspect a profile mismatch, score honestly with all-3 dims; the auto-caps + low totals will archive it.
+   - `immediate_band_inline_draft_unavailable`, `thesis_writer_should_pickup` — observed once (2026-05-07) on signal `edgar_000119312526210321_governance_keyword_6f68b96f` (CMRC). Symptom of a sandbox that can't reach `assess_thesis_v2` (RPC + Modal endpoint, or local shim) on the immediate path. **Do not write either of these tokens.** When the inline-draft infra is unavailable AFTER step 7 has persisted a real `signals.score`, leave the job in `status='queued'` (do NOT terminal-transition) so thesis_writer drains it on its next fire. Tag with `gate_reasons=['inline_draft_infra_unavailable_handoff']` for traceability — that token is non-terminal and outside the closed list above. If step 7 has not yet run, leave the row in `status='scoring'` so step 1's stuck-scoring sweeper reclaims it. Either path lets the row recover without an unauthorized terminal transition.
+
+   If you find yourself wanting to write a gate_reason that explains why you didn't do the work, stop — the answer is to do the work. The skill is designed so honest-3 scoring on a poor-fit signal naturally archives it through step 7+8 with `resolved_archive`.
 
 ## Run — step by step
 
@@ -76,9 +93,26 @@ Maintain this skip list in the skill until D-014 is reopened and the profile cou
 
 - `congressional_trading` — STOCK Act Periodic Transaction Reports. No `congressional_trading` profile in `rubric_engine.WEIGHTS`; the six current rubrics don't contain dims that match "member of Congress transacted this ticker". Scanner's `default_scoring_profile='activist_governance'` is a historical mismatch.
 
-If `scanner.name` is in the skip list:
+If `scanner.name` is in the skip list, persist a sentinel score on the signal **first** (so it has a real terminal state for convergence and so the `thesis_jobs_block_zombie_below_immediate` trigger doesn't reject the next statement), then transition the job:
 
 ```sql
+-- Statement 1: explicit terminal state on the signal — score=0, band='archive',
+-- _provenance flags this as a no-rubric defer rather than an unscored zombie.
+UPDATE public.signals
+SET score = 0,
+    band = 'archive',
+    dimensions = jsonb_build_object('_provenance', 'deferred_no_profile'),
+    auto_caps_triggered = ARRAY['no_profile_match'],
+    extensions = coalesce(extensions, '{}'::jsonb) || jsonb_build_object(
+      'resolver_skip', jsonb_build_object(
+        'reason', 'deferred_no_profile',
+        'scanner', $scanner_name,
+        'at', now()
+      )
+    )
+WHERE signal_id = $signal_id;
+
+-- Statement 2: terminal state on the job (now safe — signal has a non-NULL score).
 UPDATE public.thesis_jobs
 SET status = 'scoring_complete_below_immediate',
     completed_at = now(),
@@ -86,12 +120,14 @@ SET status = 'scoring_complete_below_immediate',
 WHERE id = $job_id;
 ```
 
-Then loop to step 1 for the next job. Do NOT consume research or rescore budget.
+Then loop to step 1 for the next job. Do NOT consume research or rescore budget. The signals UPDATE fires the reactor webhook, which will rubber-stamp `band_with_bonus='archive'` and stop further re-enqueues of this signal.
 
 ### 4. Research
 
-Budget ≤4 WebSearch queries for dim estimation. Aim for:
-- 1-2 primary-source confirmations of the filing (SEC EDGAR, CourtListener, regulator page).
+**Mandatory minimum: ≥1 primary-source check per signal not pre-empted at step 3.5.** Budget ≤4 WebSearch queries for dim estimation; the floor is 1, not 0. Skipping research and tagging the row `insufficient_evidence` without a single primary-source visit is forbidden — that's the "no_research_in_resolver_run" anti-pattern (50+ zombies in the 2026-04-27 wave). If after one honest primary-source check the filing turns out to be boilerplate or a false-positive keyword hit, score honestly with all-3 dims per invariant 2 — the rubric will land it at archive through step 7+8 with `resolved_archive`. Do not short-circuit.
+
+Aim for:
+- 1-2 primary-source confirmations of the filing (SEC EDGAR, CourtListener, regulator page) — at least 1 is required.
 - 1-2 context checks relevant to the profile's dims (comparables, counterparty history, deal terms).
 
 Record every URL + retrieval date + a ≥40-char finding. You'll reuse these for the thesis step if the signal lands at immediate (total budget still ≤6 across both steps, matching thesis_writer).
@@ -211,6 +247,8 @@ After the reactor finishes (poll `signals.band_with_bonus` for ~3s; it's usually
 
 - **`band_with_bonus = 'immediate'`** → continue to step 9 (inline thesis draft).
 
+  Note: an honest decline during the inline draft (`confidence='low'` or `insufficient_signal=true`) routes through thesis_writer §8c-flagged — promote-flagged, NOT DLQ. The flagged-pass does not consume the daily quota counted in step 9, so the order (quota check → draft → maybe-flag) remains correct.
+
 ### 9. Quota check (only on immediate)
 
 ```sql
@@ -221,6 +259,41 @@ WHERE status = 'promoted'
 ```
 
 If ≥15, transition the row to `scoring_complete_below_immediate` with `gate_reasons=['daily_quota_reached']` and stop. Reactor will re-inspect tomorrow (the signal already has `band_with_bonus='immediate'`; a future reactor event or on-demand rescore triggers a fresh enqueue).
+
+Use the same flagged-pass exclusion as thesis_writer §2 — flagged-pass promotions don't count:
+
+```sql
+SELECT count(*) AS today_promotions
+FROM public.thesis_jobs
+WHERE status = 'promoted'
+  AND completed_at >= (now() AT TIME ZONE 'UTC')::date
+  AND (gate_reasons IS NULL OR NOT 'routine_declined_flagged' = ANY(gate_reasons));
+```
+
+### 9.5. Fast-decline pre-filter (cheap, fail-safe) — inline mirror of thesis_writer §4.5
+
+Before transitioning to `drafting` and spending Claude on the inline draft, run the same three structural pre-checks defined in [thesis_writer.md](./thesis_writer.md) §4.5. The signal has been resolved through step 7 so the rubric dims and market_snapshot are persisted on `signals` and queryable; the candidate-history check is a one-row SQL probe.
+
+Differences from thesis_writer §4.5:
+
+- **Source attribution.** Set `decline_verdict.declined_by = 'signal_resolver'` (not `'thesis_writer'`) so `challenger_retro` can split per-skill precision. Stamp `flag_extensions.declined_by = 'signal_resolver'` on the §8c-flagged UPSERT (the thesis_writer §8c-flagged python block hard-codes `'thesis_writer'` — override it here).
+- **Drafting transition.** Do NOT run `UPDATE thesis_jobs SET status='drafting'` (the first line of step 10) on the pre-filter path. Skip straight to the §8c-flagged dossier render + UPSERT, then close the job:
+
+  ```sql
+  UPDATE public.thesis_jobs SET
+    status = 'promoted',
+    candidate_id = $candidate_id,
+    drafted_thesis = $stub_thesis_jsonb,
+    gate_reasons = ARRAY['routine_declined_flagged', 'prefilter_' || $check_id],
+    completed_at = now()
+  WHERE id = $job_id;
+  ```
+
+- **Decline taxonomy.** When H1 fires (repeat-decline guard), add `prior_skill` to `extensions.prior_decline_ref` so we can see whether the prior decline was thesis_writer-sourced or signal_resolver-sourced. Pure book-keeping; no behavioral change.
+
+If ALL three checks pass → continue to step 10 (inline draft).
+
+Per-job summary line on a pre-filter hit: `"<job_id>: prefilter_decline ticker.mic (resolver, H<n>: <reason_token>)"`.
 
 ### 10. Draft the v2 thesis — inline
 
