@@ -30,6 +30,10 @@ SELECT id, ticker, mic, entity_id, state, scoring_profile,
        last_aging_evaluated_at
 FROM public.candidates
 WHERE state IN ('active', 'watch')
+  -- v2-teardown: only FDA candidates are in scope. Non-FDA breadth is sunset
+  -- and the 17 live non-FDA candidates are bulk-closed in the cutover; this
+  -- stops aging from spending the Claude eval budget on out-of-scope rows.
+  AND scoring_profile IN ('binary_catalyst', 'fda_event')
   AND (last_aging_evaluated_at IS NULL
        OR last_aging_evaluated_at::date < (now() AT TIME ZONE 'UTC')::date)
 ORDER BY current_score DESC

@@ -70,6 +70,10 @@ FROM public.thesis_jobs tj
 JOIN public.signals s ON s.signal_id = tj.signal_id
 JOIN public.scanners sc ON sc.id = s.scanner_id
 WHERE tj.status = 'queued'
+  -- v2-teardown: only FDA profiles are in scope. Non-FDA breadth is sunset;
+  -- the reactor now hard-blocks non-FDA signals, but this defends against
+  -- draining any pre-halt non-FDA backlog and burning the daily cap on it.
+  AND s.scoring_profile IN ('binary_catalyst', 'fda_event')
 ORDER BY tj.created_at ASC
 LIMIT 50
 ```

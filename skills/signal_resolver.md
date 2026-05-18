@@ -55,6 +55,13 @@ mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
 SELECT id, signal_id, attempt_count, created_at
 FROM public.thesis_jobs
 WHERE status = 'needs_scoring'
+  -- v2-teardown: only FDA profiles are in scope. Non-FDA breadth is sunset;
+  -- the reactor now hard-blocks non-FDA signals, but this defends against
+  -- resolving any pre-halt non-FDA backlog and burning the shared daily cap.
+  AND signal_id IN (
+    SELECT signal_id FROM public.signals
+    WHERE scoring_profile IN ('binary_catalyst', 'fda_event')
+  )
 ORDER BY created_at ASC
 LIMIT 5
 ```
