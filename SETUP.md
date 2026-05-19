@@ -2,7 +2,9 @@
 
 Fresh-machine bootstrap for the two Cowork machines that run Conan's AI tasks. Companion to [AI_TASKS_OVERVIEW.md](AI_TASKS_OVERVIEW.md) (data-flow map) and [README.md](README.md) (repo orientation).
 
-**Last revised:** 2026-05-08 (post v3 Phase 0 merge — D-115 → D-123).
+**Last revised:** 2026-05-19 (Stream 2 now scheduled via pg_cron — see status
+table; `anthropic-orchestrator` secret status unverified, left as-is). Prior:
+2026-05-08 (post v3 Phase 0 merge — D-115 → D-123).
 
 Two roles:
 
@@ -180,22 +182,24 @@ Pedro edits on Mac → commits + pushes from `conan-cowork-skills` → JGoror's 
 
 ## 4. Modal-side wiring (Pedro, Mac, run once)
 
-Status as of 2026-05-08 after v3 Phase 0 merge:
+Status as of 2026-05-19:
 
 | Component                    | Status                                                                           |
 |------------------------------|----------------------------------------------------------------------------------|
 | reactor v12                  | ✅ deployed (D-122) — `asset_documents` branch + FDA short-circuit on `signals` |
 | fanout v8                    | ✅ deployed (D-122) — entry-point D for `convergence_assessments` immediate band|
-| `conan-v3-feedback-loop` app | ✅ deployed (D-123) — but not scheduled                                          |
-| `daily_feedback_loop` cron   | ⏳ not scheduled — free-tier 5-cron cap hit by v2; either retire a v2 cron or upgrade Modal |
+| `conan-v3-feedback-loop` app | ✅ deployed (D-123) — scheduled via pg_cron (below)                              |
+| Stream 2 daily kickoff       | ✅ **scheduled** — pg_cron `v3-feedback-loop-daily` @ 02:00 UTC (migration `20260518000000_v3_feedback_loop_pg_cron.sql`) posts `feedback_loop_kickoff` to the app. Bypasses the Modal 5-cron cap entirely — no v2 cron retired. |
 | `anthropic-orchestrator` secret | ⏳ not created — Stream 2 falls back to `scanner-secrets` and logs `[auto-fallback]` |
 
-To schedule the daily feedback loop later (Pedro decision pending):
+Stream 2 scheduling — **done** (no Modal cron slot used; pg_cron drives it):
 
 ```bash
-# After choosing which v2 cron to retire (or upgrading Modal tier):
-modal deploy modal_workers/feedback_loop_app.py
-# The @app.function decorator on daily_feedback_loop adds the cron once enabled.
+# Migration applied: supabase/migrations/20260518000000_v3_feedback_loop_pg_cron.sql
+# pg_cron 'v3-feedback-loop-daily' @ 02:00 UTC posts
+#   {"action":"feedback_loop_kickoff","args":{}} to the compute_v3 multiplex,
+#   which fans out post_mortem_runner → nightly_calibration_refit → rollback_monitor.
+# Rollback:  select cron.unschedule('v3-feedback-loop-daily');
 ```
 
 To create the dedicated secret when ready:

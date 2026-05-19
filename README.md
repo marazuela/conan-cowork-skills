@@ -61,6 +61,7 @@ optional context.
 | `fda_aging_review` | Daily 06:00 UTC | Stage-B aging review for FDA assets (v3 aging methodology port) |
 | `fda_challenger_replay` | Weekly Sun 09:00 UTC | Stratified challenger replay of FDA assessments for drift detection |
 | `bulk_orchestrator_run` | Daily 09:00 UTC + weekly Mon (v3 Tier 2) | Tier-2 sweep over `fda_assets.watch_priority`; escalates to Tier 1 |
+| `signal_entity_resolver` | Cowork every 30 min (`conan-signal-entity-resolver`, enrollment pending) | Drains `operator_flags(source='bridge_signal_to_v3')`; recovers ticker/drug/sponsor → seeds `fda_assets` or excludes non-tradeable sponsors with reason. Front-of-funnel; $0 API. See [AI_TASKS_OVERVIEW.md §3a](AI_TASKS_OVERVIEW.md) |
 | `asset_linker_backfill` | Cowork :00,:30 hourly | Drains `documents` lacking asset linkage; replaces Modal `v3-asset-linker-pass1` (see [OPUS_SKILLS_MIGRATION.md](OPUS_SKILLS_MIGRATION.md)) |
 | `fact_extractor_opus` | Cowork :15 hourly | Extracts facts from material `asset_documents`; replaces Modal `v3-fact-extractor` |
 | `skill_eval_replay` | On-demand only | 271-case backtest driver — invokes `assess-fda-binary-catalyst` against `eval_harness`, scores vs. live orchestrator (no live writes) |
