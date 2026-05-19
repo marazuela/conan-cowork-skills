@@ -2,7 +2,7 @@
 
 Single-page reference for how every AI-handled task in Conan intertwines. Companion to [SETUP.md](SETUP.md) (machine setup) and [README.md](README.md) (repo orientation).
 
-**Last revised:** 2026-05-08 (after v3 Phase 0 merged — D-115 → D-123).
+**Last revised:** 2026-05-19 (Stream 2 scheduling: chained into `daily_feedback_loop` + pg_cron, no Modal cron slot consumed).
 
 ---
 
@@ -108,7 +108,7 @@ sub_agent_literature_reviewer  sub_agent_regulatory_history  sub_agent_competiti
                         operator email + asset:<id> channel
 ```
 
-**Stream 2 (closed feedback loop, daily — NOT yet scheduled):**
+**Stream 2 (closed feedback loop, daily 02:00 UTC via pg_cron `v3-feedback-loop-daily`):**
 
 ```
 post_mortem_runner.run_post_mortem_drain
@@ -190,11 +190,9 @@ Failures route to `failed_reactor_events` (filter `payload->>'source' = '<skill_
 | fda_microstructure_review     | v2 side     | hourly :45 UTC                        | 10/day                                   | Sonnet        |
 | bulk_orchestrator_run         | v3 Tier 2   | daily 09:00 UTC (p=1) + weekly Mon (p=2) | 50 Tier-2 runs/UTC day (~$25)         | Sonnet, $0.30–0.80/run |
 | orchestrator (Tier 1)         | v3          | event-driven (`new_doc`, `cross_source`, `operator_refresh`, `tier2_escalation`) | N=7 ensemble + Tier-1 hard-kill ceiling | $10–15/run, ~3–4 min |
-| post_mortem_runner            | v3 Stream 2 | **not scheduled** (free-tier cron cap)| —                                        | Haiku 4.5     |
-| nightly_calibration_refit     | v3 Stream 2 | **not scheduled**                     | n ≥ 200 D-103 gate                       | compute only  |
-| rollback_monitor              | v3 Stream 2 | **not scheduled**                     | n ≥ 30 trigger                           | compute only  |
+| daily_feedback_loop (drain → monitor → refit) | v3 Stream 2 | daily 02:00 UTC via Supabase pg_cron `v3-feedback-loop-daily` | drain batch 200; refit n≥200 (D-103 gate); rollback n≥30 trigger | Haiku 4.5 (post-mortem text) + compute |
 
-v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three Stream 2 functions are deployed but unscheduled. Resolution path: choose a v2 cron to retire OR upgrade the Modal tier.
+Modal's free-tier 5-cron cap is fully consumed by conan-v2 (1 Period + 4 Cron). D-123's three Stream 2 steps were chained into a single `daily_feedback_loop` function and triggered via Supabase pg_cron (`v3-feedback-loop-daily`, `0 2 * * *`) — zero Modal cron slots consumed. Same pattern as v3 orchestrator drain and asset-linker pg_cron jobs. Migration: `20260508114735_v3_feedback_loop_pg_cron`.
 
 ---
 
@@ -209,7 +207,7 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 | `rpc_multi_fetch`              | signal_resolver, thesis_writer  | Fetch filings / Storage objects                    |
 | `orchestrator_run_one`         | reactor (v3)                    | Run Tier-1 orchestrator on one asset               |
 | `orchestrator_drain_queue`     | Modal cron                      | Drain orchestrator_runs queue (max 5/run)          |
-| `daily_feedback_loop`          | Modal cron (when scheduled)     | Stream 2 unified entrypoint                        |
+| `daily_feedback_loop`          | pg_cron `v3-feedback-loop-daily`| Stream 2 unified entrypoint (drain → monitor → refit) |
 | `post_mortem_drain_dry_run`    | manual `modal run`              | Dry-run validation of Stream 2                     |
 | `rollback_monitor_dry_run`     | manual `modal run`              | Dry-run validation of rollback                     |
 
@@ -227,9 +225,8 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 
 ---
 
-## 10. Open work (as of 2026-05-08)
+## 10. Open work (as of 2026-05-19)
 
-- ⏳ Schedule the three Stream 2 functions (free-tier cron cap blocking).
 - ⏳ Create Modal secret `anthropic-orchestrator` (D-123 falls back to `scanner-secrets`).
 - ⏳ Build `sub_agent_options_microstructure` (Phase 5 stub).
 - ⏳ 8 MCP servers planned for Phase 4.7 (PubMed, bioRxiv, openFDA, FDA AdComm, Polygon, internal RAG, compute, clinicaltrials) — `compute_mcp.py` is a stub today.
