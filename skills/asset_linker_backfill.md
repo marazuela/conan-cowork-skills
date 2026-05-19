@@ -29,7 +29,7 @@ You are the **asset_linker pass-1** for the Conan v3 pipeline. The Modal worker 
 SELECT count(*) AS halt
 FROM operator_flags
 WHERE source = 'asset_linker_hard_halt'
-  AND status = 'open'
+  AND resolved_at IS NULL
   AND created_at > now() - interval '24 hours';
 ```
 
