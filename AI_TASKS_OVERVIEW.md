@@ -2,7 +2,7 @@
 
 Single-page reference for how every AI-handled task in Conan intertwines. Companion to [SETUP.md](SETUP.md) (machine setup) and [README.md](README.md) (repo orientation).
 
-**Last revised:** 2026-05-08 (after v3 Phase 0 merged — D-115 → D-123).
+**Last revised:** 2026-05-19 (audit of §10 against live code: Stream 2, options_microstructure, and Stream 3 marked done; MCP server status corrected; v3 dashboard restated).
 
 ---
 
@@ -96,19 +96,19 @@ sub_agent_literature_reviewer  sub_agent_regulatory_history  sub_agent_competiti
                               Stage 8 isotonic calibration (D-103 gated)
                               Stage 10 finalize → conviction_pct + direction + citations
                                        │
-                                       ▼ INSERT
-                              convergence_assessments (band derived from percentile)
+                                       ▼ INSERT (atomic via persist_assessment_v3 RPC)
+                              convergence_assessments  +  post_mortem_queue (status='pending')
                                        │
                               ┌────────┴───────────┐
                               ▼                    ▼
-                        fanout entry-D     post_mortem_queue
-                        (band='immediate')  (resolves at outcome window)
+                        fanout entry-D     Stream 2 drains at outcome_window_end
+                        (band='immediate')
                               │
                               ▼ render HTML/text + Storage upload + Resend + Realtime broadcast
                         operator email + asset:<id> channel
 ```
 
-**Stream 2 (closed feedback loop, daily — NOT yet scheduled):**
+**Stream 2 (closed feedback loop, daily 02:00 UTC via pg_cron `v3-feedback-loop-daily`):**
 
 ```
 post_mortem_runner.run_post_mortem_drain
@@ -131,7 +131,7 @@ rollback_monitor
    │ → if n≥30 AND (corr<0.20 OR Δcorr ≤ −0.15): restore prior calibration_curves snapshot
 ```
 
-Code anchors: [conan-fda-orchestrator-plugin/skills/](../Conan/conan-fda-orchestrator-plugin/skills/) (3 sub-agent files), [modal_workers/orchestrator_app.py](../Conan/modal_workers/orchestrator_app.py), [modal_workers/feedback_loop_app.py](../Conan/modal_workers/feedback_loop_app.py), [modal_workers/shared/post_mortem_runner.py](../Conan/modal_workers/shared/post_mortem_runner.py). Decisions: D-100, D-102, D-103, D-104, D-105, D-115, D-117, D-118, D-119, D-122, D-123 in [DECISIONS.md](../Conan/DECISIONS.md).
+Code anchors: [conan-fda-orchestrator-plugin/skills/](../Conan/conan-fda-orchestrator-plugin/skills/) (4 sub-agent files incl. options_microstructure), [modal_workers/orchestrator_app.py](../Conan/modal_workers/orchestrator_app.py), [orchestrator_runtime/runtime.py](../Conan/orchestrator_runtime/runtime.py) (Stage 10 finalize), [modal_workers/feedback_loop_app.py](../Conan/modal_workers/feedback_loop_app.py), [modal_workers/shared/post_mortem_runner.py](../Conan/modal_workers/shared/post_mortem_runner.py), `supabase/migrations/20260528000000_persist_assessment_v3_rpc.sql` (atomic INSERT convergence_assessments + post_mortem_queue). Decisions: D-100, D-102, D-103, D-104, D-105, D-115, D-117, D-118, D-119, D-122, D-123 in [DECISIONS.md](../Conan/DECISIONS.md).
 
 ---
 
@@ -190,11 +190,9 @@ Failures route to `failed_reactor_events` (filter `payload->>'source' = '<skill_
 | fda_microstructure_review     | v2 side     | hourly :45 UTC                        | 10/day                                   | Sonnet        |
 | bulk_orchestrator_run         | v3 Tier 2   | daily 09:00 UTC (p=1) + weekly Mon (p=2) | 50 Tier-2 runs/UTC day (~$25)         | Sonnet, $0.30–0.80/run |
 | orchestrator (Tier 1)         | v3          | event-driven (`new_doc`, `cross_source`, `operator_refresh`, `tier2_escalation`) | N=7 ensemble + Tier-1 hard-kill ceiling | $10–15/run, ~3–4 min |
-| post_mortem_runner            | v3 Stream 2 | **not scheduled** (free-tier cron cap)| —                                        | Haiku 4.5     |
-| nightly_calibration_refit     | v3 Stream 2 | **not scheduled**                     | n ≥ 200 D-103 gate                       | compute only  |
-| rollback_monitor              | v3 Stream 2 | **not scheduled**                     | n ≥ 30 trigger                           | compute only  |
+| daily_feedback_loop (drain → monitor → refit) | v3 Stream 2 | daily 02:00 UTC via Supabase pg_cron `v3-feedback-loop-daily` | drain batch 200; refit n≥200 (D-103 gate); rollback n≥30 trigger | Haiku 4.5 (post-mortem text) + compute |
 
-v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three Stream 2 functions are deployed but unscheduled. Resolution path: choose a v2 cron to retire OR upgrade the Modal tier.
+Modal's free-tier 5-cron cap is fully consumed by conan-v2 (1 Period + 4 Cron). D-123's three Stream 2 steps were chained into a single `daily_feedback_loop` function and triggered via Supabase pg_cron (`v3-feedback-loop-daily`, `0 2 * * *`) — zero Modal cron slots consumed. Same pattern as v3 orchestrator drain and asset-linker pg_cron jobs. Migration: `20260508114735_v3_feedback_loop_pg_cron`.
 
 ---
 
@@ -209,7 +207,8 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 | `rpc_multi_fetch`              | signal_resolver, thesis_writer  | Fetch filings / Storage objects                    |
 | `orchestrator_run_one`         | reactor (v3)                    | Run Tier-1 orchestrator on one asset               |
 | `orchestrator_drain_queue`     | Modal cron                      | Drain orchestrator_runs queue (max 5/run)          |
-| `daily_feedback_loop`          | Modal cron (when scheduled)     | Stream 2 unified entrypoint                        |
+| `persist_assessment_v3`        | Stage 10 (orchestrator runtime) | Atomic INSERT convergence_assessments + secondaries + post_mortem_queue |
+| `daily_feedback_loop`          | pg_cron `v3-feedback-loop-daily`| Stream 2 unified entrypoint (drain → monitor → refit) |
 | `post_mortem_drain_dry_run`    | manual `modal run`              | Dry-run validation of Stream 2                     |
 | `rollback_monitor_dry_run`     | manual `modal run`              | Dry-run validation of rollback                     |
 
@@ -218,8 +217,9 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 ## 9. Where things live
 
 - **v2 trio + auditors + FDA review skills:** [skills/](skills/) (this repo, hardlinked into `Conan/.claude/skills/` on the Mac).
-- **v3 sub-agents:** [conan-fda-orchestrator-plugin/skills/](../Conan/conan-fda-orchestrator-plugin/skills/) (in the `marazuela/conan` repo, NOT this one — they're Cowork plugin skills with `context: fork`, MCP tool lists, output schemas).
-- **v3 orchestrator runtime:** [modal_workers/orchestrator_app.py](../Conan/modal_workers/orchestrator_app.py).
+- **v3 sub-agents:** [conan-fda-orchestrator-plugin/skills/](../Conan/conan-fda-orchestrator-plugin/skills/) and [modal_workers/sub_agents/](../Conan/modal_workers/sub_agents/) — four roles: `literature`, `regulatory_history`, `competitive`, `options_microstructure`, plus the `ic_memo` synthesis runner. Cowork plugin skills with `context: fork`, MCP tool lists, output schemas in `schemas/` (this repo).
+- **v3 MCP servers:** [conan-fda-orchestrator-plugin/mcp_servers/](../Conan/conan-fda-orchestrator-plugin/mcp_servers/) — `pubmed`, `biorxiv` (intentional stub), `openfda`, `fda_adcomm`, `polygon`, `internal_rag`, `compute`, `clinicaltrials`.
+- **v3 orchestrator runtime:** [modal_workers/orchestrator_app.py](../Conan/modal_workers/orchestrator_app.py) (Modal app entry) + [orchestrator_runtime/runtime.py](../Conan/orchestrator_runtime/runtime.py) (stages 1–10, including Stage 10 finalize).
 - **v3 feedback loop:** [modal_workers/feedback_loop_app.py](../Conan/modal_workers/feedback_loop_app.py) + [modal_workers/shared/post_mortem_runner.py](../Conan/modal_workers/shared/post_mortem_runner.py).
 - **v2 reactor / fanout edge functions:** [supabase/functions/reactor/index.ts](../Conan/supabase/functions/reactor/index.ts), [supabase/functions/fanout/index.ts](../Conan/supabase/functions/fanout/index.ts).
 - **Decisions log:** [DECISIONS.md](../Conan/DECISIONS.md) (D-100+).
@@ -227,11 +227,20 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 
 ---
 
-## 10. Open work (as of 2026-05-08)
+## 10. Open work (as of 2026-05-19)
 
-- ⏳ Schedule the three Stream 2 functions (free-tier cron cap blocking).
-- ⏳ Create Modal secret `anthropic-orchestrator` (D-123 falls back to `scanner-secrets`).
-- ⏳ Build `sub_agent_options_microstructure` (Phase 5 stub).
-- ⏳ 8 MCP servers planned for Phase 4.7 (PubMed, bioRxiv, openFDA, FDA AdComm, Polygon, internal RAG, compute, clinicaltrials) — `compute_mcp.py` is a stub today.
-- ⏳ Stream 3: Stage 10 finalization + post_mortem_queue population.
-- ⏳ v3 dashboard surfaces (Phase A foundation lift in progress per D-111).
+Validated against live code on 2026-05-19. Items completed since the 2026-05-08 revision have been removed.
+
+**Operator action required:**
+
+- ⏳ **Create Modal secret `anthropic-orchestrator`** — blocks `orchestrator_app.py` deploy (DECISIONS.md D-537, D-572, D-629). Run on the Mac runner: `modal secret create anthropic-orchestrator ANTHROPIC_API_KEY=<rotated_key>`. Verify with `python modal_workers/scripts/preflight_axs05.py` (Gate 0.1 flips fail → pass). `feedback_loop_app.py` continues to use `scanner-secrets` as a temporary Anthropic key fallback (D-123) until then; a follow-up PR will add `anthropic-orchestrator` to its `secrets=[...]` list (additive — `scanner-secrets` still needed for Polygon).
+
+**Engineering work outstanding:**
+
+- ⏳ **v3 dashboard surfaces (D-111 Phase A).** Decision locked 2026-05-07 (12 Q&A conventions, orchestrator output contract §13). **Code not started.** Phase A scaffold (types regen, `dashboard/lib/api/`, four components: `<ConvictionDisplay />`, `<SubAgentPanels />`, `<CitationViewer />`, `<TierBadge />`) outlined in D-111 but unmerged. Blocked on: (a) backend ratification of the §13 contract, (b) new RPCs (`fda_asset_set_watch_priority`, `fda_asset_set_active`, `fda_asset_pin_reference_class`, `eval_case_open`, `eval_case_resolve`), (c) `marazuela/conan-dashboard` repo consuming the contract. In-repo `ui_v2/` is v2-only (see [ui_v2/spec.md](../Conan/ui_v2/spec.md), [tasks/ui_v2_todo.md](../Conan/tasks/ui_v2_todo.md), still gated on Pedro review of the datapoints catalog). Phase B/C/D (visual lock) deferred until Phase A ships.
+
+**Minor / Wave-6 follow-ups (optional):**
+
+- ⏳ **MCP server gaps (low priority).** All 8 Phase 4.7 servers exist (D-105 / RAG infrastructure); 6 are fully implemented and wired (pubmed, openfda, fda_adcomm, polygon, internal_rag, compute, clinicaltrials). Two items remain: (a) `biorxiv_mcp.py` is an intentional v1 stub returning empty results (52 lines, flagged `v1_stub_returns_empty` in `.mcp.json`) — promote to real preprint coverage when preprint demand justifies; (b) `clinicaltrials_mcp.py` is fully implemented (86 lines, real CT.gov v2 HTTP) and registered in `.mcp.json` but no sub-agent's `tool_defs` enables it yet — wire into `RegulatoryHistoryRunner` or `LiteratureRunner` when a use case lands.
+
+- ⏳ **Stream 3 observability** (implementation is complete per [`orchestrator_runtime/runtime.py:946-1364`](../Conan/orchestrator_runtime/runtime.py) and `persist_assessment_v3` RPC; remaining is instrumentation only): (a) Wave-6 audit alert when a `post_mortem_queue` row remains `status='pending'` beyond 180d past `outcome_window_end`; (b) Stream-3 health view (assessments/day, queue depth, calibration fit quality); (c) backfill 30+ historical assessments to prime `reference_class_base_rates` Wilson-CI estimates before live calibration kicks in.
