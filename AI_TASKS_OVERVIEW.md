@@ -2,7 +2,10 @@
 
 Single-page reference for how every AI-handled task in Conan intertwines. Companion to [SETUP.md](SETUP.md) (machine setup) and [README.md](README.md) (repo orientation).
 
-**Last revised:** 2026-05-08 (after v3 Phase 0 merged — D-115 → D-123).
+**Last revised:** 2026-05-19. Adds the front-of-funnel `signals → fda_assets`
+bridge + the new `signal_entity_resolver` skill (§3a); Stream 2 is now
+scheduled via pg_cron (no longer Modal-cron-cap-blocked); open-work refreshed.
+Prior revision 2026-05-08 (v3 Phase 0, D-115 → D-123).
 
 ---
 
@@ -108,7 +111,7 @@ sub_agent_literature_reviewer  sub_agent_regulatory_history  sub_agent_competiti
                         operator email + asset:<id> channel
 ```
 
-**Stream 2 (closed feedback loop, daily — NOT yet scheduled):**
+**Stream 2 (closed feedback loop, daily — SCHEDULED via pg_cron `v3-feedback-loop-daily` @ 02:00 UTC, migration `20260518000000_v3_feedback_loop_pg_cron.sql`; dispatches `feedback_loop_kickoff` to the `conan-v3-feedback-loop` app, bypassing Modal's free-tier cron cap):**
 
 ```
 post_mortem_runner.run_post_mortem_drain
@@ -132,6 +135,56 @@ rollback_monitor
 ```
 
 Code anchors: [conan-fda-orchestrator-plugin/skills/](../Conan/conan-fda-orchestrator-plugin/skills/) (3 sub-agent files), [modal_workers/orchestrator_app.py](../Conan/modal_workers/orchestrator_app.py), [modal_workers/feedback_loop_app.py](../Conan/modal_workers/feedback_loop_app.py), [modal_workers/shared/post_mortem_runner.py](../Conan/modal_workers/shared/post_mortem_runner.py). Decisions: D-100, D-102, D-103, D-104, D-105, D-115, D-117, D-118, D-119, D-122, D-123 in [DECISIONS.md](../Conan/DECISIONS.md).
+
+---
+
+## 3a. Front-of-funnel: `signals → fda_assets` bridge + resolver
+
+§3's flow starts at `documents → asset_documents`, but FDA assets must first
+*exist* in `fda_assets` for any of it to run. That seeding is the front of the
+funnel:
+
+```
+binary_catalyst / fda_event signal  (scanners, e.g. pre_phase3_readout, eop2)
+   │ INSERT
+   ▼
+reactor  → {skipped:"fda_profile_routed_to_orchestrator"}   (no v2 convergence)
+   │
+   ▼ trigger bridge_signal_to_v3_row()  (supabase/migrations/20260522000000)
+   ├─ ticker AND drug_name AND sponsor all resolved  ──► INSERT fda_assets (seed)
+   └─ otherwise  ──► operator_flags(source='bridge_signal_to_v3')   [dead-end]
+                          │
+                          ▼ drained by:
+   signal_entity_resolver  (Cowork, every 30 min, zero API spend)
+     │ recover missing field(s): SEC issuer index (sponsor→ticker),
+     │ CT.gov-by-sponsor / NCT (→ drug_name), 8-K for eop2
+     │ → seed fda_assets  OR  close flag with explicit exclusion reason
+     │   (large-cap / foreign-unlisted / academic = correct exclusion,
+     │    NOT seeded — anti-breadth, FDA-depth strategy)
+     ▼
+   fda_assets  ──► asset_linker_backfill links documents ──► §3 v3 flow
+```
+
+Why it matters: the `pre_phase3_readout` scanner gates emission on a US
+public-issuer match (#24/#32, live in prod since 2026-05-14), so the bulk of
+non-tradeable sponsors are dropped at the scanner. The bridge handles the
+residue; `signal_entity_resolver` recovers genuine small/mid-caps whose sponsor
+string failed fuzzy-match and explicitly excludes the rest. A one-time
+2026-05-14 backfill batch of 141 flags was drained 2026-05-19 (15 seeded /
+123 excluded / 3 escalated; 0 open). Steady-state inflow is low (eop2 a
+few/week); the recurring task handles it.
+
+The skill's two `operator_flags.source` values
+(`signal_entity_resolver_hard_halt`, `signal_entity_resolver_run`) are added by
+migration `20260529000000_signal_entity_resolver_sources.sql` (drift-proof
+append; PR #90, applied to live DB out-of-band 2026-05-18, **merge pending**).
+Enrollment of the `conan-signal-entity-resolver` Cowork task (cron
+`*/30 * * * *`) is **pending** — must be done in the runner's Cowork session
+to keep zero-API-spend.
+
+Code anchors: [skills/signal_entity_resolver.md](skills/signal_entity_resolver.md),
+`bridge_signal_to_v3_row()` in `supabase/migrations/20260522000000_v3_bridge_signal_to_fda_assets.sql`,
+`pre_phase3_readout_scanner.py` (#24/#32 public-issuer gate).
 
 ---
 
@@ -170,7 +223,7 @@ Failures route to `failed_reactor_events` (filter `payload->>'source' = '<skill_
 | `failed_reactor_events`       | reactor edge fn AND Cowork preflight skills          | operator triage; filter on `payload->>'source'` |
 | `thesis_drafting_failures`    | thesis_writer (challenger decline / syntactic gate fail) | operator triage; `error_kind` enum |
 | `candidate_aging_failures`    | candidate_aging                                      | operator triage; `error_kind`, `consecutive_failures` |
-| `operator_flags`              | translation_health, scanner_probe, convergence_qa, coverage_auditor, challenger_retro, FDA review skills | dashboard operator panel |
+| `operator_flags`              | translation_health, scanner_probe, convergence_qa, coverage_auditor, challenger_retro, FDA review skills; `bridge_signal_to_v3` (unseeded FDA signals → drained by signal_entity_resolver); `signal_entity_resolver_run`/`_hard_halt` (audit + kill-switch) | dashboard operator panel; bridge flags = signal_entity_resolver work queue |
 | `post_mortem_queue` (status=`no_outcome`) | post_mortem_runner when ticker delisted/halted/sentinel | calibration runs skip these |
 
 ---
@@ -188,13 +241,19 @@ Failures route to `failed_reactor_events` (filter `payload->>'source' = '<skill_
 | fda_medical_review            | v2 side     | hourly :15 UTC                        | 10/day                                   | Sonnet        |
 | fda_regulatory_review         | v2 side     | hourly :30 UTC                        | 10/day                                   | Sonnet        |
 | fda_microstructure_review     | v2 side     | hourly :45 UTC                        | 10/day                                   | Sonnet        |
+| signal_entity_resolver        | v3 front-of-funnel | every 30 min (`conan-signal-entity-resolver`, **enrollment pending**) | 25/run, 150/UTC day | Cowork subscription, $0 API |
 | bulk_orchestrator_run         | v3 Tier 2   | daily 09:00 UTC (p=1) + weekly Mon (p=2) | 50 Tier-2 runs/UTC day (~$25)         | Sonnet, $0.30–0.80/run |
 | orchestrator (Tier 1)         | v3          | event-driven (`new_doc`, `cross_source`, `operator_refresh`, `tier2_escalation`) | N=7 ensemble + Tier-1 hard-kill ceiling | $10–15/run, ~3–4 min |
-| post_mortem_runner            | v3 Stream 2 | **not scheduled** (free-tier cron cap)| —                                        | Haiku 4.5     |
-| nightly_calibration_refit     | v3 Stream 2 | **not scheduled**                     | n ≥ 200 D-103 gate                       | compute only  |
-| rollback_monitor              | v3 Stream 2 | **not scheduled**                     | n ≥ 30 trigger                           | compute only  |
+| post_mortem_runner            | v3 Stream 2 | **scheduled** — pg_cron `v3-feedback-loop-daily` 02:00 UTC | —                       | Haiku 4.5     |
+| nightly_calibration_refit     | v3 Stream 2 | **scheduled** (same daily kickoff)    | n ≥ 200 D-103 gate                       | compute only  |
+| rollback_monitor              | v3 Stream 2 | **scheduled** (same daily kickoff)    | n ≥ 30 trigger                           | compute only  |
 
-v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three Stream 2 functions are deployed but unscheduled. Resolution path: choose a v2 cron to retire OR upgrade the Modal tier.
+Stream 2 was previously blocked by Modal's free-tier 5-cron cap. Resolved by
+scheduling from **pg_cron** instead (`20260518000000_v3_feedback_loop_pg_cron.sql`):
+a single Supabase cron at 02:00 UTC posts `{"action":"feedback_loop_kickoff"}`
+to the `conan-v3-feedback-loop` multiplex, which fans out post_mortem_runner →
+nightly_calibration_refit → rollback_monitor. No Modal cron slot consumed.
+Rollback: `select cron.unschedule('v3-feedback-loop-daily');`.
 
 ---
 
@@ -217,7 +276,7 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 
 ## 9. Where things live
 
-- **v2 trio + auditors + FDA review skills:** [skills/](skills/) (this repo, hardlinked into `Conan/.claude/skills/` on the Mac).
+- **v2 trio + auditors + FDA review skills + `signal_entity_resolver`:** [skills/](skills/) (this repo, symlinked into `Conan/.claude/skills/` on the Mac). `signal_entity_resolver` is the v3 front-of-funnel resolver (§3a); its DB sources are added by `Conan` migration `20260529000000_signal_entity_resolver_sources.sql` (PR #90).
 - **v3 sub-agents:** [conan-fda-orchestrator-plugin/skills/](../Conan/conan-fda-orchestrator-plugin/skills/) (in the `marazuela/conan` repo, NOT this one — they're Cowork plugin skills with `context: fork`, MCP tool lists, output schemas).
 - **v3 orchestrator runtime:** [modal_workers/orchestrator_app.py](../Conan/modal_workers/orchestrator_app.py).
 - **v3 feedback loop:** [modal_workers/feedback_loop_app.py](../Conan/modal_workers/feedback_loop_app.py) + [modal_workers/shared/post_mortem_runner.py](../Conan/modal_workers/shared/post_mortem_runner.py).
@@ -227,9 +286,17 @@ v2 cron functions consume Modal's free-tier 5-cron cap; that's why D-123's three
 
 ---
 
-## 10. Open work (as of 2026-05-08)
+## 10. Open work (as of 2026-05-19)
 
-- ⏳ Schedule the three Stream 2 functions (free-tier cron cap blocking).
+- ✅ Stream 2 scheduling — **done** via pg_cron `v3-feedback-loop-daily`
+  (migration `20260518000000`), no longer blocked by the Modal cron cap.
+- ⏳ Merge PR #90 (`20260529000000_signal_entity_resolver_sources.sql`,
+  drift-proof; already applied to live DB). Blocked on GitHub merge auth.
+- ⏳ Enroll the `conan-signal-entity-resolver` Cowork task (`*/30 * * * *`)
+  in the runner's Cowork session — must run there for zero-API-spend.
+- ⏳ eval_harness re-curation: the 271-case bench is corrupted by the same
+  entity-resolution gap (keyword-join noise, polluted `drug_name`); blocks
+  the single-shot-vs-chain backtest (D-128). See plan §1c.
 - ⏳ Create Modal secret `anthropic-orchestrator` (D-123 falls back to `scanner-secrets`).
 - ⏳ Build `sub_agent_options_microstructure` (Phase 5 stub).
 - ⏳ 8 MCP servers planned for Phase 4.7 (PubMed, bioRxiv, openFDA, FDA AdComm, Polygon, internal RAG, compute, clinicaltrials) — `compute_mcp.py` is a stub today.
