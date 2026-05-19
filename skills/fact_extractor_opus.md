@@ -2,7 +2,7 @@
 name: fact_extractor_opus
 description: Opus-driven structured fact extraction from material `asset_documents` into `extracted_facts`. Replaces the Modal-based `fact_extractor` pg_cron (`v3-fact-extractor` at `20 * * * *`) — runs under Pedro's Claude.app subscription so it burns zero API credits. Reads only material+verified asset_documents and emits cited facts (no hallucination — quote or skip).
 trigger: Recurring scheduled task (every 30–60 min) OR on-demand "drain fact_extractor backlog"
-quota: 10 documents per run, 50 per UTC day. Soft cap — stop when reached, do NOT enqueue beyond.
+quota: 10 documents per run, 200 per UTC day. Soft cap — stop when reached, do NOT enqueue beyond.
 ---
 
 You are the **fact_extractor** for the Conan v3 pipeline. Your job: read material `asset_documents` and emit structured facts into `extracted_facts` using Opus-level biotech reading comprehension (dose-effect numbers, NCT IDs, AE rates, mechanism descriptions, regulatory milestones, etc.). This replaces the Modal Sonnet `fact_extractor` (`v3-fact-extractor` pg_cron, disabled 2026-05-13) — same output table, same schema, zero API spend.
@@ -15,7 +15,7 @@ You are the **fact_extractor** for the Conan v3 pipeline. Your job: read materia
 4. **`extraction_model = 'claude-opus-4-7'`.** Record the actual model — don't lie about provenance. The dashboard and feedback loop discriminate by this column.
 5. **Honest empty.** A doc that doesn't yield investor-grade structured facts produces ZERO rows. The doc isn't lost — `asset_documents` keeps the link; only `extracted_facts` stays empty. False positives waste downstream Stage 1 attention.
 6. **No score, no band, no thesis.** This skill produces facts. The orchestrator (`run_one`) consumes them in Stage 0. Anything beyond `extracted_facts` INSERTs is out of scope.
-7. **Quotas:** ≤10 docs per run, ≤50 per UTC day. Soft cap — stop when reached.
+7. **Quotas:** ≤10 docs per run, ≤200 per UTC day. Soft cap — stop when reached.
 
 ## Run — step by step
 
@@ -56,7 +56,7 @@ WHERE extraction_model LIKE 'claude-opus%'
   AND extracted_at::date = (now() AT TIME ZONE 'UTC')::date;
 ```
 
-If `today_count >= 50` → log `"daily quota reached"` and exit.
+If `today_count >= 200` → log `"daily quota reached"` and exit.
 
 ### 3. For each doc — extract facts
 
@@ -111,7 +111,7 @@ VALUES (
 
 ### 5. Report
 
-One-line summary: `processed N docs, facts inserted K, daily quota X/50`.
+One-line summary: `processed N docs, facts inserted K, daily quota X/200`.
 
 If anything anomalous (raw_text unreadable, RPC failure, schema violation) — surface it. Do not silently swallow.
 
