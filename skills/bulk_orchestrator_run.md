@@ -107,6 +107,12 @@ SELECT count(*) AS used_today
    AND status IN ('completed','failed');
 ```
 
+> Schema note: `orchestrator_runs` has **no `updated_at` column**. Its
+> lifecycle timestamps are `created_at`, `scheduled_at`, `started_at`,
+> `completed_at`. Any ad-hoc freshness / "stuck run" query MUST use those
+> (e.g. `completed_at IS NULL AND started_at < now() - interval '1 hour'`);
+> referencing `updated_at` raises `42703` and aborts the query.
+
 If `used_today + len(pending_assets) > 50`, truncate the pending list to fit, and tag the deferred assets via:
 
 ```sql
