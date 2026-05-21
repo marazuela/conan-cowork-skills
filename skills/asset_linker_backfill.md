@@ -19,7 +19,12 @@ You are the **asset_linker pass-1** for the Conan v3 pipeline. The Modal worker 
 6. **link_type taxonomy is fixed.** Use only: `primary`, `mentions`, `pipeline_context`, `safety_signal`, `literature`. Definitions in step 5 — do not invent variants.
 7. **Honest empty.** If a doc mentions an asset only in boilerplate, market-table, or competitive landscape with no investor signal: emit `{"links": []}` and stamp `no_match`. The Modal worker's empty-rate problem came from over-eager linking — don't repeat it.
 8. **`extraction_method='cowork_backfill'`.** Always. Distinguishes Cowork-emitted rows from `'agent_pass1'` / `'agent_pass2'` (legacy Modal) and prevents pass-2 Haiku verification from re-running on them.
-9. **Race safety.** The Modal `v3-asset-linker-pass1` pg_cron is disabled but `v3-asset-linker-pass2` (Haiku verification) is still active. Pass-2 reads `verified_by_pass2 = false` rows — leave that field FALSE on your inserts so the Haiku verifier picks them up.
+9. **Yield-first claim order.** Both Modal `v3-asset-linker-pass1` (disabled 2026-05-13) AND `v3-asset-linker-pass2` (Haiku verifier — also removed from cron.job as of 2026-05-21) are gone. No concurrent writers exist. Claim docs in YIELD order so ticks don't burn on 2023 EDGAR noise (a 2026-05-20 manual drain found 0/25 hits oldest-first, then 35/52 hits yield-first):
+   - tier 1: `source IN ('conan_signal','press_release')` (~37% / ~82% hit rate)
+   - tier 2: `source IN ('clinicaltrials','dailymed','openfda','fda_advisory')`
+   - tier 3: everything else (EDGAR / federal_register / etc.), newest-first
+
+   Still leave `verified_by_pass2 = false` on inserts — if pass-2 ever comes back, the FALSE flag means it'll re-verify your rows.
 
 ## Run — step by step
 
@@ -44,7 +49,7 @@ FROM public.fda_assets WHERE is_active = true;
 
 Save this hash. You'll stamp it on every doc you touch this run. The Modal worker uses the same construction (`asset_linker.py:_active_asset_set_hash`); keeping it identical is what makes Cowork-emitted and Modal-emitted stamps interchangeable.
 
-### 2. Find work (oldest-first)
+### 2. Find work (yield-first per invariant 9)
 
 ```sql
 WITH pending AS (
@@ -55,13 +60,19 @@ WITH pending AS (
   WHERE (d.linker_classified_at IS NULL
          OR d.linker_classified_asset_set_hash IS NULL
          OR d.linker_classified_asset_set_hash <> '<asset_set_hash from step 1>')
-  ORDER BY d.published_at ASC NULLS LAST
+  ORDER BY
+    CASE
+      WHEN d.source IN ('conan_signal','press_release')                       THEN 1
+      WHEN d.source IN ('clinicaltrials','dailymed','openfda','fda_advisory') THEN 2
+      ELSE                                                                         3
+    END,
+    d.published_at DESC NULLS LAST
   LIMIT 25
 )
 SELECT * FROM pending;
 ```
 
-**Why oldest-first:** the Modal pass-2 Haiku verifier (`v3-asset-linker-pass2` at `:10,:40`) is still active. Letting two workers traverse opposite ends of the queue minimizes collisions. If empty → log `"queue drained"` and exit.
+**Why yield-first:** the historical queue is dominated by Goldman/JPM/Morgan Stanley 424B2 prospectuses and Federal Register notices that have near-zero biotech hit rate. Tier-1 sources (`conan_signal`, `press_release`) yield links on most rows; tier-3 (EDGAR generic) yields almost nothing. With no concurrent writer (Modal pass-1 + pass-2 are both off), there's no race-safety reason to claim oldest-first. If empty → log `"queue drained"` and exit.
 
 ### 3. Daily quota check
 
