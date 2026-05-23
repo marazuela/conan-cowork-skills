@@ -2,77 +2,156 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://conan/marazuela/schemas/regulatory_history_v1.json",
   "title": "Regulatory History Sub-Agent Output (v1)",
+  "description": "Structured output from the regulatory_history sub-agent runner. Methodology lifted from Investment_engine_v2 Tier-1 P1 (analyze-fda-approval-prospects) + P2 (research-clinical-class-precedent). Hard-validated before return; failure → failed_reactor_events with source='sub_agent.regulatory_history' (per memory: failed_reactor_events_shared_dlq).",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "asset_id",
-    "prior_adcomms",
-    "analogous_approvals",
-    "regulatory_risks",
+    "class_membership",
+    "class_precedents",
+    "base_rates",
+    "sponsor_track_record",
+    "reviewer_panel_concerns",
+    "divergence_from_norm_flags",
+    "sourcing_completeness_pct",
     "retrieved_at"
   ],
   "properties": {
     "schema_version": { "const": 1 },
     "asset_id": { "type": "string", "format": "uuid" },
-    "prior_adcomms": {
+
+    "class_membership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["moa_canonical", "class_drugs_in_scope", "membership_confidence"],
+      "properties": {
+        "moa_canonical": { "type": "string", "minLength": 1 },
+        "class_drugs_in_scope": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "maxItems": 50
+        },
+        "membership_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fallback": {
+          "type": "boolean",
+          "default": false,
+          "description": "True if class membership was inferred via hardcoded fallback table rather than live ChEMBL lookup."
+        }
+      }
+    },
+
+    "class_precedents": {
       "type": "array",
+      "minItems": 0,
+      "maxItems": 50,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["date", "drug", "indication", "vote"],
+        "required": ["drug", "sponsor", "year", "decision", "indication", "primary_source_url"],
         "properties": {
-          "date": { "type": "string", "format": "date" },
           "drug": { "type": "string", "minLength": 1 },
-          "sponsor": { "type": ["string", "null"] },
-          "indication": { "type": "string", "minLength": 1 },
-          "vote": {
+          "sponsor": { "type": "string", "minLength": 1 },
+          "year": { "type": "integer", "minimum": 1950, "maximum": 2100 },
+          "decision": {
             "type": "string",
-            "description": "e.g. '14-1 favor', '6-9 against', 'split', 'no vote — discussion only'"
+            "enum": ["approval", "CRL", "withdrawal"]
           },
-          "fda_concerns": {
+          "indication": { "type": "string", "minLength": 1 },
+          "outcome_factors": {
             "type": "array",
             "items": { "type": "string", "minLength": 1 },
             "maxItems": 15
           },
+          "boxed_warning": { "type": "boolean" },
+          "rems": { "type": "boolean" },
+          "adcomm_held": { "type": "boolean" },
+          "adcomm_vote": {
+            "type": ["string", "null"],
+            "description": "e.g. '14-1 favor', '6-9 against', 'split', 'no vote — discussion only', 'unknown'"
+          },
           "primary_source_url": { "type": "string", "format": "uri" },
           "fact_citations": { "type": "array", "items": { "type": "string" } }
         }
       }
     },
-    "analogous_approvals": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["drug", "indication", "approval_date", "basis_for_approval"],
-        "properties": {
-          "drug": { "type": "string" },
-          "indication": { "type": "string" },
-          "approval_date": { "type": "string", "format": "date" },
-          "basis_for_approval": { "type": "string" },
-          "endpoint_used": { "type": ["string", "null"] },
-          "primary_source_url": { "type": "string", "format": "uri" },
-          "fact_citations": { "type": "array", "items": { "type": "string" } }
+
+    "base_rates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class_approval_rate", "n"],
+      "properties": {
+        "class_approval_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "class_approval_rate_ci_low": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "class_approval_rate_ci_high": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "n": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of class precedents the rate is computed over."
+        },
+        "adcomm_convene_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "boxed_warning_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "median_nda_to_decision_days": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+
+    "sponsor_track_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_approvals", "prior_crls"],
+      "properties": {
+        "prior_approvals": { "type": "integer", "minimum": 0 },
+        "prior_crls": { "type": "integer", "minimum": 0 },
+        "prior_breakthrough": { "type": "integer", "minimum": 0 },
+        "rtor_participated": { "type": "boolean" },
+        "active_warning_letters": { "type": "integer", "minimum": 0 },
+        "recent_facility_inspections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["facility", "date", "outcome"],
+            "properties": {
+              "facility": { "type": "string", "minLength": 1 },
+              "date": { "type": "string", "format": "date" },
+              "outcome": {
+                "type": "string",
+                "enum": ["OAI", "VAI", "NAI", "none", "unknown"]
+              }
+            }
+          },
+          "maxItems": 20
         }
       }
     },
-    "regulatory_risks": {
+
+    "reviewer_panel_concerns": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["risk", "severity"],
-        "properties": {
-          "risk": { "type": "string", "minLength": 1 },
-          "severity": { "type": "string", "enum": ["high", "medium", "low"] },
-          "mitigation": { "type": ["string", "null"] }
-        }
-      }
+      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 20
     },
-    "crl_precedent_found": { "type": "boolean", "default": false },
+
+    "divergence_from_norm_flags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 20,
+      "description": "Each flag MUST be grounded in enumerated class_precedents — do not invent."
+    },
+
+    "sourcing_completeness_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "(claims with primary_source_url) / (total claims). Hard floor 0.85; below that constitutional check rejects."
+    },
+
     "retrieved_at": { "type": "string", "format": "date-time" },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-    "partial_output": { "type": "boolean", "default": false }
+    "memory_writeback_path": { "type": ["string", "null"] },
+    "partial_output": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if budget was exhausted before completion."
+    }
   }
 }
