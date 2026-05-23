@@ -2,18 +2,30 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://conan/marazuela/schemas/competitive_landscape_v1.json",
   "title": "Competitive Landscape Sub-Agent Output (v1)",
+  "description": "Structured output from the competitive sub-agent runner. Captures pipeline enumeration, sponsor sizing, market dynamics, and white-space assessment. Hard-validated before return; failure → failed_reactor_events with source='sub_agent.competitive'.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "asset_id",
+    "indication",
+    "class_membership_source",
     "competitors",
-    "moat_summary",
+    "market_dynamics",
+    "white_space_assessment",
+    "sourcing_completeness_pct",
     "retrieved_at"
   ],
   "properties": {
     "schema_version": { "const": 1 },
     "asset_id": { "type": "string", "format": "uuid" },
+    "indication": { "type": "string", "minLength": 1 },
+
+    "class_membership_source": {
+      "type": "string",
+      "enum": ["passed_in", "inferred"]
+    },
+
     "competitors": {
       "type": "array",
       "minItems": 0,
@@ -21,43 +33,85 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "pipeline_stage", "mechanism"],
+        "required": ["sponsor", "drug", "phase", "differentiator", "endpoint_overlap", "threat_level", "primary_source_url"],
         "properties": {
-          "name": { "type": "string", "minLength": 1 },
+          "sponsor": { "type": "string", "minLength": 1 },
+          "drug": { "type": "string", "minLength": 1 },
           "ticker": { "type": ["string", "null"] },
-          "pipeline_stage": {
+          "sponsor_market_cap_usd": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "USD; null if sponsor is private or sizing unavailable."
+          },
+          "phase": {
             "type": "string",
-            "enum": ["preclinical", "phase1", "phase2", "phase3", "filed", "approved", "discontinued", "unknown"]
+            "enum": ["preclinical", "1", "2", "3", "filed", "approved", "withdrawn", "unknown"]
           },
-          "mechanism": { "type": "string", "minLength": 1 },
-          "indication": { "type": ["string", "null"] },
-          "differentiators": {
-            "type": "array",
-            "items": { "type": "string", "minLength": 1 },
-            "maxItems": 10
+          "next_milestone": { "type": ["string", "null"] },
+          "next_milestone_date": {
+            "type": ["string", "null"],
+            "format": "date"
           },
-          "threats_to_thesis": {
-            "type": "array",
-            "items": { "type": "string", "minLength": 1 },
-            "maxItems": 10
+          "differentiator": {
+            "type": "string",
+            "enum": ["first-in-class", "best-in-class", "me-too", "cheaper_admin", "safer_label", "other"]
           },
-          "primary_source_urls": {
-            "type": "array",
-            "items": { "type": "string", "format": "uri" },
-            "minItems": 1,
-            "maxItems": 5
+          "endpoint_overlap": {
+            "type": "string",
+            "enum": ["primary_same", "primary_different", "secondary_overlap"]
           },
-          "fact_citations": {
-            "type": "array",
-            "items": { "type": "string" }
-          }
+          "threat_level": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "primary_source_url": { "type": "string", "format": "uri" },
+          "fact_citations": { "type": "array", "items": { "type": "string" } }
         }
       }
     },
-    "moat_summary": {
+
+    "market_dynamics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["assessment", "key_factors"],
+      "required": ["n_competitors_phase3_or_later", "n_recent_in_class_approvals_36mo", "n_recent_in_class_crls_36mo"],
+      "properties": {
+        "n_competitors_phase3_or_later": { "type": "integer", "minimum": 0 },
+        "n_recent_in_class_approvals_36mo": { "type": "integer", "minimum": 0 },
+        "n_recent_in_class_crls_36mo": { "type": "integer", "minimum": 0 },
+        "indication_TAM_usd": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Total addressable market in USD; null if estimate unavailable."
+        },
+        "incumbent_market_share_top3_pct": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 100 },
+          "maxItems": 3,
+          "description": "Top-3 incumbent market shares as percentages 0–100."
+        }
+      }
+    },
+
+    "white_space_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["is_first_in_class_for_indication", "is_first_in_subpopulation"],
+      "properties": {
+        "is_first_in_class_for_indication": { "type": "boolean" },
+        "is_first_in_subpopulation": { "type": "boolean" },
+        "subpopulation": { "type": ["string", "null"] },
+        "differentiation_durability_months": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Months until the closest competitive threat is expected to file."
+        }
+      }
+    },
+
+    "moat_summary": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Optional Stage-5-derivable rollup. Sub-agent MAY emit; Stage 5 will recompute from competitors[] + market_dynamics + white_space_assessment regardless.",
       "properties": {
         "assessment": {
           "type": "string",
@@ -71,8 +125,21 @@
         "summary": { "type": "string" }
       }
     },
+
+    "sourcing_completeness_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "(competitors with primary_source_url) / (total competitors)."
+    },
+
     "retrieved_at": { "type": "string", "format": "date-time" },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-    "partial_output": { "type": "boolean", "default": false }
+    "memory_writeback_path": { "type": ["string", "null"] },
+    "partial_output": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if budget was exhausted before completion."
+    }
   }
 }
