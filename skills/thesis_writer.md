@@ -246,6 +246,11 @@ Produce a JSON object with these fields:
   "next_catalyst_date": "YYYY-MM-DD or 'Q2 2026' or 'H2 2026' or 'early/mid/late 2026' or 'July 2026'",
   "kill_conditions": "… ≥60 chars prose …",
   "steelman": "… ≥120 chars, same tag discipline. Argue against the thesis seriously. If you can't, the thesis isn't real.",
+  "variant_perception": "… ≥80 chars. Where YOU differ from consensus — the belief delta, not just the underpricing claim. FDA example: 'We price 65% approval for AXS-05; sell-side consensus is 50%; the delta comes from the Phase 3 ADA pre-spec we believe FDA will accept under the new draft guidance.' Required by the §6.7 discipline gate.",
+  "preconditions": "… ≥40 chars. Facts that must hold for the thesis to fire. FDA example: 'PDUFA action date 2026-09-15 unchanged; no AdCom convened; CMC inspection of the Bedminster site closed without 483.' Required by the §6.7 discipline gate.",
+  "return_distribution": "… ≥60 chars; must contain at least one digit. Probability-weighted scenarios with explicit anchors. FDA example: 'P(approval, T+30) = 0.65 → +35% to $7.20; P(CRL, T+30) = 0.30 → -55% to $2.40; P(delay, T+30) = 0.05 → flat at $4.05; EV = +18%.' Required by the §6.7 discipline gate.",
+  "time_horizon": "… ≥60 chars. Resolution path with at least one milestone date. FDA example: 'Horizon = PDUFA 2026-09-15 (T+0); pre-decision read on advisory committee minutes 2026-08-30; AdCom-trigger watch through 2026-08-15.' Derives from next_catalyst_date if absent. Required by the §6.7 discipline gate.",
+  "sizing_inputs": "… ≥40 chars. FDA-specific position-cap math (NOT generic conviction-grade prose). Example: 'Max position = min(market_cap * 0.01, $5M); ADV-based clip = 5% of 30-day median dollar volume; expected drawdown on CRL = -55% so unit-risk position size = thesis_position * 0.45.' Required by the §6.7 discipline gate.",
   "web_research": [
     {"url": "https://…", "retrieved_at": "YYYY-MM-DD", "finding": "≥40 chars", "lean": "strengthening" | "weakening" | "neutral"},
     …   // ≥3 total; ≥1 with lean ≠ strengthening
@@ -301,6 +306,100 @@ Spec reference: §7.4 pseudocode — declines skip both the challenger and the s
 ```
 
 The drafter is the source of this verdict — the challenger routine was NOT invoked for declines. This object is persisted into `candidates.extensions.decline_verdict` on the flagged-pass branch (no `thesis_drafting_failures` row anymore). `challenger_retro` step 5 buckets `decline` verdicts on a 4th axis (over_decline / early_save / timing_save) tracked separately from miss/save metrics.
+
+### 6.7. Discipline gate (before challenger) — 6 v2 fields must be present
+
+Ported from `compose-thesis-with-discipline` in the v2_skills export. Catches drafts that pass syntactic gates yet ship without a real variant-perception statement, structured preconditions, scenario-distribution math, milestone-bounded time horizon, or FDA-specific sizing. The premise is that a thesis missing ANY of these is structurally weak even if it survives the challenger — the v2 export's "refuse-on-empty" stance is more disciplined than the current adversarial-only gate.
+
+**Pre-check: feature flag and §6.5 short-circuit**
+
+Read `internal_config.discipline_gate_enabled`:
+
+```sql
+SELECT value FROM public.internal_config WHERE key = 'discipline_gate_enabled';
+```
+
+Modes:
+- `'false'` (default) — **shadow mode**: parse + verify fields below, write the verdict into `all_drafts[last].discipline_verdict` for offline measurement, but DO NOT change routing. Proceed to §6.8 challenger as usual.
+- `'true'` — **active**: verdict drives routing per the rules below.
+
+If §6.5 already short-circuited (`confidence: "low"` OR `insufficient_signal: true`), skip §6.7 entirely. Honest declines have already been routed to §8c-flagged with their own audit object.
+
+**Validate the 6 fields**
+
+| Field | Min chars | Notes |
+|---|---|---|
+| `variant_perception` | 80 | Required string. |
+| `preconditions` | 40 | Required string. |
+| `kill_criteria` (derived) | n/a | Synopsis of existing `structured_kill_conditions[]`; if that array has ≥3 entries the field is considered present. |
+| `return_distribution` | 60 + must contain digit | Required string; must match regex `\d`. |
+| `time_horizon` | 60 | Required string. If totally absent BUT the draft has a non-NULL `next_catalyst_date`, synthesize a one-line stub (`"Horizon: <next_catalyst_date>"`) so `time_horizon` is considered present. |
+| `sizing_inputs` | 40 | Required string. FDA-specific phrasing (max position $ from market_cap, ADV clip). |
+
+For each field, classify:
+- **present** — non-empty AND length ≥ min_chars AND (if a regex applies) matches it.
+- **too_short** — non-empty AND length < min_chars (or numeric-content regex fails).
+- **missing** — absent OR length 0.
+
+**Verdict shape (append to `all_drafts[last].discipline_verdict`)**
+
+```json
+{
+  "verdict": "discipline_pass" | "discipline_decline" | "discipline_retry",
+  "missing_fields": ["preconditions", "sizing_inputs"],
+  "present_but_too_short": ["variant_perception"],
+  "min_chars_required": {
+    "variant_perception": 80,
+    "preconditions": 40,
+    "return_distribution": 60,
+    "time_horizon": 60,
+    "sizing_inputs": 40
+  },
+  "shadow": true,
+  "caller_spec_sha": "<sha256 of .claude/skills/thesis_writer.md>"
+}
+```
+
+`shadow` is `true` when `discipline_gate_enabled='false'` (verdict logged, routing unchanged).
+
+**Routing**
+
+When `discipline_gate_enabled='true'`:
+
+- All 6 fields **present** → verdict `discipline_pass` → proceed to §6.8 challenger.
+- Any field **missing** (totally absent) → verdict `discipline_decline` → no retry, jump to §8c-flagged. Set:
+  ```
+  gate_reasons += ['routine_declined_flagged']
+              + ['discipline_missing_<field>' for each missing field]
+  extensions.decline_verdict = the discipline_verdict object above
+  ```
+  Rationale: if the drafter doesn't even attempt the field, the §6 prompt template is the right fix, not burning attempt budget.
+- Otherwise (one or more fields **too_short** but none **missing**) → verdict `discipline_retry` → ONE retry via §8b semantics (`status='gate_failed_retrying'`, increment `attempt_count`). Corrective prompt:
+
+  > "Prior draft was missing/thin on these v2 discipline fields: $TOO_SHORT. Re-emit the full thesis JSON with each field expanded to at least the minimum length (see min_chars_required). Do NOT re-draft from scratch — amend."
+
+  If `attempt_count >= 2` already, do not retry; route to §8c-flagged with `gate_reasons += ['discipline_retry_budget_exhausted']`.
+
+When `discipline_gate_enabled='false'` (shadow mode), record the would-be verdict into `all_drafts[last].discipline_verdict` with `shadow: true` and proceed to §6.8 regardless. The shadow window lets us measure false-positive rate before flipping the flag.
+
+**Monitoring**
+
+Dashboard query for post-flip health:
+
+```sql
+SELECT date_trunc('day', updated_at) AS day,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM unnest(gate_reasons) gr WHERE gr LIKE 'discipline_%'
+       )) AS discipline_events,
+       count(*) FILTER (WHERE status='promoted'
+                          AND NOT 'routine_declined_flagged' = ANY(coalesce(gate_reasons, '{}'))) AS clean_promoted,
+       count(*) AS total
+FROM public.thesis_jobs
+WHERE updated_at > now() - interval '14 days'
+GROUP BY 1 ORDER BY 1;
+```
+
+Alert if discipline-event rate exceeds 20% of all drafts — that signals the §6 prompt template is generating systematically empty fields, not that genuine declines are climbing. Fix the prompt, don't retune the gate.
 
 ### 6.8. Semantic gate — challenger pass (before syntactic gate)
 
@@ -732,6 +831,8 @@ After step 6.8 (challenger) and step 7 (syntactic gate), the two verdicts combin
 | `kill` | — | DLQ `final_reasons=[challenger_kill, ...]` (step 8e) — skip retry, skip syntactic gate |
 | — | — (honest decline) | **Promote-flagged** (`extensions.routine_declined=true`, `state='watch'`, gate_reasons=['routine_declined_flagged'], no quota consumed, no email) (step 6.5 → 8c-flagged) — skip both gates |
 | — | — (pre-filter decline) | **Promote-flagged** with `gate_reasons=['routine_declined_flagged','prefilter_H1'\|'prefilter_H2'\|'prefilter_H3']`, `extensions.decline_verdict.prefilter_check` set (step 4.5 → 6.5 → 8c-flagged) — skip research, draft, both gates |
+| — | — (§6.7 discipline decline) | **Promote-flagged** with `gate_reasons=['routine_declined_flagged','discipline_missing_<field>',...]`, `extensions.decline_verdict` carrying the discipline verdict (step 6.7 → 8c-flagged) — skip challenger + syntactic gate. Only when `discipline_gate_enabled='true'`. |
+| — | — (§6.7 discipline retry) | **Retry via §8b** with `gate_reasons=['discipline_retry_budget'] + ['discipline_too_short_<field>',...]`, `attempt_count++`. Hits §8c-flagged with `discipline_retry_budget_exhausted` on the second too-short verdict. |
 
 The challenger runs BEFORE the syntactic gate (step 6.8 before step 7). A `kill` from the challenger short-circuits the syntactic gate entirely — no point paying for char-count validation on a structurally dead thesis.
 
@@ -793,4 +894,19 @@ Before emitting `{status: 'promoted'}` for a job, verify:
 - [ ] `attempt_count` did NOT increment beyond the step 3 claim (no retry budget consumed).
 - [ ] `challenge_count = 0` (challenger never invoked).
 
-Emit a summary line per job: `"<job_id>: promoted ticker.mic (score X→Y, band Y, challenger=confirm)"` for clean promotes, `"<job_id>: flagged ticker.mic (routine_declined: <reason>)"` for §6.5 flagged-passes, `"<job_id>: prefilter_decline ticker.mic (H<n>: <reason_token>)"` for §4.5 pre-filter declines, or `"<job_id>: dlq (<terse reason>, challenge_count=N)"` for gate-failure DLQs.
+**Discipline-decline branch** (§6.7 short-circuit on missing v2 fields; only when `discipline_gate_enabled='true'`):
+
+- [ ] `internal_config.discipline_gate_enabled = 'true'` at the time §6.7 was reached.
+- [ ] `candidates` row exists with `state='watch'` AND `extensions->>'routine_declined' = 'true'` AND `extensions->'decline_verdict'->>'verdict' = 'discipline_decline'`.
+- [ ] `thesis_jobs.gate_reasons` contains both `'routine_declined_flagged'` AND ≥1 `'discipline_missing_<field>'` token.
+- [ ] `challenge_count = 0` (challenger never invoked — discipline gate runs before §6.8).
+- [ ] No `assess_thesis_v2` call was made (syntactic gate also skipped).
+- [ ] `all_drafts[last].discipline_verdict.shadow = false` (active mode, not shadow).
+
+**Discipline shadow-mode** (when `discipline_gate_enabled='false'`):
+
+- [ ] §6.7 ran and wrote `all_drafts[last].discipline_verdict` with `shadow: true`.
+- [ ] Routing was UNCHANGED — promotion / decline / DLQ all driven by §6.8 + §7 verdicts only.
+- [ ] No `discipline_missing_<field>` tokens in `gate_reasons` (those only land when the gate is active).
+
+Emit a summary line per job: `"<job_id>: promoted ticker.mic (score X→Y, band Y, challenger=confirm)"` for clean promotes, `"<job_id>: flagged ticker.mic (routine_declined: <reason>)"` for §6.5 flagged-passes, `"<job_id>: prefilter_decline ticker.mic (H<n>: <reason_token>)"` for §4.5 pre-filter declines, `"<job_id>: discipline_decline ticker.mic (missing=[<fields>])"` for §6.7 active-mode declines, or `"<job_id>: dlq (<terse reason>, challenge_count=N)"` for gate-failure DLQs.
