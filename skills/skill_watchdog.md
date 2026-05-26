@@ -90,7 +90,11 @@ FROM public.thesis_jobs
 WHERE status IN ('queued','drafting')
   AND coalesce(updated_at, created_at) < now() - interval '8 hours';
 ```
-DARK if `stuck > 0`.
+DARK if `stuck > 0`. Severity is **warn** at `stuck ∈ [1,5]`; escalate to
+**critical** at `stuck > 5` — that depth means the every-6h cron has missed
+≥2 fires and immediate-band signals are now stranded outside their alerting
+SLA. thesis_writer is a P0 routine (state-mutating, no other writer
+produces candidates from immediate-band signals).
 
 ### candidate_aging — daily
 
@@ -134,6 +138,12 @@ DARK if `stale > 0`. Keep the exclusion list in sync with the canonical
 `UNSCORED_PROFILES` set; new binary_catalyst types added there must be
 added here too.
 
+Severity is **warn** at `stale ∈ [1,10]`; escalate to **critical** at
+`stale > 10` — that depth means the every-2h cron has missed ≥3 fires
+and the immediate-band funnel is now backed up beyond single-cycle
+recovery. signal_resolver is a P0 routine (every immediate-band signal
+flows through this skill; no other writer scores them).
+
 ## Raise / resolve
 
 For each DARK skill that has no existing unresolved flag, INSERT:
@@ -154,8 +164,21 @@ VALUES
 
 Severity guidance:
 - `warn` for normal dark detections.
-- `critical` for `candidate_aging` bootstrap_failure or
-  `bulk_orchestrator_priority1` missed-daily-sweep (pipeline-dark risk).
+- `critical` for:
+  - `candidate_aging` with `bootstrap_failed > 0` (silent-abort failure
+    mode this watchdog exists to catch).
+  - `bulk_orchestrator_priority1` missed-daily-sweep (Tier-2 write path
+    pipeline-dark).
+  - `signal_resolver` with `stale > 10` (≥3 missed every-2h cron fires;
+    immediate-band funnel backed up beyond single-cycle recovery).
+  - `thesis_writer` with `stuck > 5` (≥2 missed every-6h cron fires;
+    immediate-band signals stranded outside their alerting SLA).
+
+The depth-threshold escalation on signal_resolver and thesis_writer reflects
+their P0 status: state-mutating routines that no other writer covers. A
+single stranded row is still warn (transient — the next fire recovers); a
+real backlog is critical because it means the routine has actually gone
+dark, not just slipped one cycle.
 
 For each previously-flagged skill that is no longer dark (side-effect fresh
 again on this run), resolve it instead of inserting:

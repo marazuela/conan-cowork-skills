@@ -2,15 +2,36 @@
 
 Each `.md` file in this directory is a paste-ready prompt for a Cowork scheduled task. Pair the wrapper with the skill file at `../skills/<name>.md`: the wrapper tells Claude what cadence / guardrails / report-JSON shape; the skill has the step-by-step instructions the wrapper says to "follow verbatim".
 
-## The 5 scheduled tasks
+## Scheduled tasks
+
+### Conan v2 pipeline (signals → candidates → outcomes)
 
 | Wrapper | Cadence | Skill | Touches |
 |---|---|---|---|
-| `signal_resolver.md` | every 10 min | `signal_resolver` | drains `thesis_jobs` WHERE status='needs_scoring' — resolve dims, inline-draft on immediate band |
-| `thesis_writer.md` | hourly | `thesis_writer` | drains `thesis_jobs` WHERE status='queued' — draft theses for immediate-band signals |
-| `candidate_aging.md` | daily 06:00 UTC | `candidate_aging` | sweeps active + watch candidates — Stage A mechanical, Stage B Claude |
-| `coverage_auditor.md` | weekly Sun 04:00 UTC | `coverage_auditor` | recall audit against `catalyst_universe` — SQL-only |
-| `challenger_retro.md` | weekly Sun 09:00 UTC | `challenger_retro` | samples labeled outcomes, re-invokes challenger, writes `accuracy_metrics` |
+| `signal_resolver.md` | every 10 min | `signal_resolver` | drains `thesis_jobs` WHERE status='needs_scoring' — resolve dims, inline-draft on immediate band (FDA-only post-v2-teardown) |
+| `thesis_writer.md` | every 6h | `thesis_writer` | drains `thesis_jobs` WHERE status='queued' — §4.5 prefilter, §6.5 flagged-pass, §6.7 discipline gate, §6.8 challenger, §7 syntactic gate |
+| `candidate_aging.md` | daily 08:00 CEST | `candidate_aging` | sweeps active + watch candidates — Stage A mechanical + Stage B Claude with challenger semantic gate on every triggered claim |
+| `challenger_retro.md` | manual (canonical on JGoror, weekly Sun) | `challenger_retro` | samples labeled outcomes, re-invokes challenger, 4-axis matrix + rolling-30d + per-prefilter precision |
+| `coverage_auditor.md` | **manual only** (canonical in Modal `reporting_weekly`) | `coverage_auditor` | recall audit against `catalyst_universe` — SQL-only, spot-check tool |
+
+### Conan v3 pipeline (assets → orchestrator → assessments)
+
+| Wrapper | Cadence | Skill | Touches |
+|---|---|---|---|
+| `bulk_orchestrator_run.md` | daily 11:00 CEST (priority=1), weekly Mon 11:00 CEST (priority=2) | `bulk_orchestrator_run` | Tier-2 sweep of `fda_assets.watch_priority` — registered as two routines `bulk_orchestrator_priority1` / `priority2` |
+| `fact_extractor_opus.md` | hourly | `fact_extractor_opus` | structured fact extraction from material `asset_documents` → `extracted_facts` (200/day cap) |
+| `asset_linker_backfill.md` | every 30 min | `asset_linker_backfill` | classify `documents` → `asset_documents` links, yield-first ordering (300/day cap) |
+| `fda_aging_review.md` | daily 06:30 UTC | `fda_aging_review` | Stage B Claude review on `fda_assets.aging_state='kill_pending'` (10/UTC-day cap) |
+| `fda_medical_review.md` | every 2h | `fda_medical_review` | drains `fda_agent_reviews` WHERE agent_kind='medical' (10/UTC-day cap) |
+| `fda_regulatory_review.md` | every 2h | `fda_regulatory_review` | drains `fda_agent_reviews` WHERE agent_kind='regulatory' (10/UTC-day cap) |
+| `fda_microstructure_review.md` | every 2h | `fda_microstructure_review` | drains `fda_agent_reviews` WHERE agent_kind='microstructure' (10/UTC-day cap) |
+| `fda_challenger_replay.md` | weekly Sun 09:00 UTC | `fda_challenger_replay` | Stage 3 replay on labeled v3 outcomes — accuracy_metrics + flags |
+
+### Observability
+
+| Wrapper | Cadence | Skill | Touches |
+|---|---|---|---|
+| `skill_watchdog.md` | every 2h | `skill_watchdog` | detects recurring skills gone dark via DB side-effect SLA; raises/resolves `operator_flags` |
 
 ## Portability: `$CONAN_ROOT`
 
