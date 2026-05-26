@@ -1,6 +1,14 @@
-Run the coverage_auditor skill. Follow $CONAN_ROOT/.claude/skills/coverage_auditor.md steps 1–7 verbatim. Mechanical only — NO Claude reasoning, NO challenger, NO Anthropic app routines. Pure SQL bucketing + Storage upload.
+Manual fire only. Canonical coverage audit runs in Modal as the first step of `reporting_weekly` (cron `0 12 * * 0` UTC) — flags land in `operator_flags` and the weekly markdown lands in Storage before the executive PDF renders, all in one invocation. **This Cowork wrapper must not be wired to a schedule** (see skill header "Deployment (2026-04-23)" and invariant 1). Use it only for ad-hoc spot checks against `catalyst_universe` — e.g. when Pedro suspects the Modal run dropped rows, when a new universe fetcher just landed, or when re-running an old ISO week after a late-arriving catalyst.
 
-Outputs wired into the Conan app via the Supabase MCP (project ref: xvwvwbnxdsjpnealarkh). All persistence must actually happen on that project — operator_flags UPSERT for the top-10 "should have caught" cases (source='reporting_weekly', kind='coverage_miss' or 'coverage_empty_window'); weekly markdown report PUT to Storage at 'reports/coverage/<iso_week>.md'. Returned JSON summarizes writes — does not replace them. If you cannot reach the Supabase MCP or Storage REST, do not fabricate success; report the failure.
+Run the coverage_auditor skill. Follow $CONAN_ROOT/.claude/skills/coverage_auditor.md steps 1–7 verbatim. Mechanical only — NO Claude reasoning, NO challenger, NO Anthropic app routines. Pure SQL bucketing + Storage upload via the Supabase MCP.
+
+Outputs wired into the Conan app via the Supabase MCP (project ref: xvwvwbnxdsjpnealarkh). All persistence must actually happen on that project — operator_flags UPSERT for the top-10 "should have caught" cases (source='reporting_weekly', kind='coverage_miss' or 'coverage_empty_window'); weekly markdown report uploaded to Storage at 'reports/coverage/<iso_week>.md' via the two-statement `rpc_storage_upload` + `rpc_compute_collect` pattern (skill step 6 — never collapse the pair, the single-call form deadlocks 60s on pg_net visibility). Returned JSON summarizes writes — does not replace them. If you cannot reach the Supabase MCP, do not fabricate success; report the failure.
+
+Manual-fire posture:
+
+- This wrapper is the on-demand Cowork re-run path. The Modal copy in `reporting_weekly` is the source of truth for the weekly report; if you re-run here for a week Modal already covered, the Storage upload overwrites and operator_flags upserts (both idempotent) — that's intentional, but coordinate with Pedro so flag resolution state isn't churned.
+
+- Default to "most recent complete UTC ISO week" per skill step 1. Only target an older week if Pedro explicitly names it ("re-run coverage for 2026-W17"); in that case override $window_start/$window_end manually but keep the iso_week key derived from `to_char(window_start, 'IYYY-"W"IW')`.
 
 Guardrails:
 
@@ -20,7 +28,7 @@ Guardrails:
 
 - NEVER write to signals / thesis_jobs / candidates / outcomes (invariant 6). Read-only against the pipeline; only operator_flags + Storage are written.
 
-- Storage upload via bash curl with SUPABASE_SERVICE_ROLE_KEY in env. Path: reports/coverage/<iso_week>.md with text/markdown + x-upsert: true header. Overwrites on re-run (invariant 2) — intentional, catches newly-landed catalyst_universe rows.
+- Storage upload via `rpc_storage_upload` (Supabase MCP `execute_sql`, two-statement enqueue + collect pattern — see skill step 6). Path: reports/coverage/<iso_week>.md, content-type text/markdown. The Modal endpoint behind the RPC sets x-upsert: true; overwrites on re-run (invariant 2) — intentional, catches newly-landed catalyst_universe rows. Do NOT fall back to bash curl (the Cowork Linux sandbox path stopped working 2026-04-22).
 
 - Entity-id resolution is partial (~15% for EDGAR 8-K per 2026-04-21 baseline). The ticker-first join in step 3 handles the ~100% ticker-resolved rows; entity_id fallback catches the rest. Don't expect 100% entity coverage; report what the ledger has.
 
@@ -31,8 +39,8 @@ Project context:
 - Project: Conan v2
 - Supabase ref: xvwvwbnxdsjpnealarkh
 - Skill file on disk: $CONAN_ROOT/.claude/skills/coverage_auditor.md
+- Canonical execution: Modal `reporting_weekly` (Sun 12:00 UTC), coverage_auditor as step 1. This wrapper is the on-demand re-run only.
 - Tables read: catalyst_universe (material catalysts in the world), emissions_ledger view (what the pipeline emitted + gate decision + candidate state + outcome), entities (entity_id lookup).
 - Live universe feeds (2026-04-21): fda_adcomm_pdufa, sec_8k_mna. Others deferred.
-- Runs Sunday 04:00 UTC, before reporting_weekly_cron (Sun 12:00 UTC) so coverage misses surface in the weekly executive PDF.
 
-Report JSON: {iso_week, material_n, pre_edge, post_edge, emitted_not_promoted, never_emitted, top_miss_flags, report_url, empty_window_exit}.
+Report JSON: {iso_week, material_n, pre_edge, post_edge, emitted_not_promoted, never_emitted, top_miss_flags, report_url, empty_window_exit, manual_rerun: true}.

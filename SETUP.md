@@ -2,14 +2,15 @@
 
 Fresh-machine bootstrap for the two Cowork machines that run Conan's AI tasks. Companion to [AI_TASKS_OVERVIEW.md](AI_TASKS_OVERVIEW.md) (data-flow map) and [README.md](README.md) (repo orientation).
 
-**Last revised:** 2026-05-19 (Stream 2 now scheduled via pg_cron — see status
-table; `anthropic-orchestrator` secret status unverified, left as-is). Prior:
-2026-05-08 (post v3 Phase 0 merge — D-115 → D-123).
+**Last revised:** 2026-05-26 (routine mirror refresh — JGoror now mirrors all 15
+recurring routines; SETUP §3 + §7 updated to match the post-2026-05-23 skill
+methodology batch and the new v3 FDA review cadences). Prior:
+2026-05-19 (Stream 2 pg_cron schedule); 2026-05-08 (v3 Phase 0 merge).
 
 Two roles:
 
-- **Mac (authoring, primary):** Pedro edits skills, drives Modal deploys, runs ad-hoc skills. Has all three repos.
-- **Windows (JGoror, runner):** unattended runner for the v2 Cowork scheduled tasks. Read-only in practice.
+- **Mac (authoring, primary):** Pedro edits skills, drives Modal deploys, runs ad-hoc skills. Has all three repos. **All routines also registered locally for parity** — they are paused / manual-only on Pedro's machine so JGoror is the live writer (avoids dual-write contention on the 15/day shared promotion cap).
+- **Windows (JGoror, runner):** unattended live runner for the full 15-routine recurring set. Read-only in practice (never edits skills or wrappers).
 
 ---
 
@@ -142,24 +143,44 @@ if (Test-Path "$env:CONAN_ROOT")             { "CONAN_ROOT OK" }     else { "CON
 
 ### Cowork scheduled tasks on the runner
 
-The three v2 tasks live **in Pedro's Cowork session itself**, not in any external scheduler — they are NOT visible via `mcp__scheduled-tasks` MCP. Configure them inside Claude Desktop's Cowork scheduled tasks UI:
+The recurring routines live in Claude Desktop's Cowork scheduled-tasks UI. As of 2026-05-26 JGoror mirrors the full 15-routine set so a single machine drains the entire pipeline; Pedro's Mac keeps the same registrations but with each one paused (the wrapper text is identical, so re-enabling on the Mac during a JGoror outage takes one toggle).
 
-| Task              | Cron                                          | Phrase                              |
-|-------------------|-----------------------------------------------|-------------------------------------|
-| `signal_resolver` | every 10 min                                  | "drain signal_resolver queue"       |
-| `thesis_writer`   | hourly at :00 UTC                             | "drain queued theses"               |
-| `candidate_aging` | daily 06:00 UTC                               | "run candidate aging sweep"         |
-| `challenger_retro`| weekly Sun 09:00 UTC                          | "run challenger retro"              |
+**Setup procedure on a fresh runner:** for each row below, open Cowork → Scheduled Tasks → New, paste the full content of the matching `wrappers/<name>.md` from `$CONAN_COWORK_ROOT/wrappers/` as the prompt, set the cron + description per the table, click "Run now" once to pre-approve the Supabase MCP + WebSearch tools (otherwise the first scheduled fire will pause on permission prompts).
 
-The hourly FDA review trio (`fda_medical_review`, `fda_regulatory_review`, `fda_microstructure_review`) is also Cowork-scheduled — typically only on the runner if Pedro has signed off on the FDA volume:
+**v2 pipeline (FDA-only post-teardown):**
 
-| Task                          | Cron               | Phrase                                  |
-|-------------------------------|--------------------|-----------------------------------------|
-| `fda_medical_review`          | hourly :15 UTC     | "drain queued FDA medical reviews"      |
-| `fda_regulatory_review`       | hourly :30 UTC     | "drain queued FDA regulatory reviews"   |
-| `fda_microstructure_review`   | hourly :45 UTC     | "drain queued FDA microstructure reviews" |
+| Task              | Cron (local time)              | Schedule note                         |
+|-------------------|--------------------------------|---------------------------------------|
+| `signal_resolver` | `0 */2 * * *` (every 2 h)      | Drains thesis_jobs WHERE status='needs_scoring'. FDA-only filter; 15/day shared promotion cap with `thesis_writer`. |
+| `thesis_writer`   | `0 */6 * * *` (every 6 h)      | Drains thesis_jobs WHERE status='queued'. Throttled 2026-05-11 from 3h→6h; v2 lane near-dormant. |
+| `candidate_aging` | `0 8 * * *` (08:00 CEST daily) | Stage A mechanical + Stage B Claude. 15/day Stage B quota. Bootstrap-preflight loud-fail. |
+| `challenger_retro`| `0 11 * * 0` (Sun 11:00 CEST)  | 09:00 UTC. Precision-drift detector. Read-only against live state. |
 
-`coverage_auditor` is **not** a Cowork task — it runs as the first step of the Modal `reporting_weekly` cron (`0 12 * * 0` UTC). Don't schedule it on the runner.
+`coverage_auditor` is **not** a Cowork task — it runs as the first step of the Modal `reporting_weekly` cron (`0 12 * * 0` UTC). Keep the wrapper registered as **manual only** on both machines for spot-check re-runs; never schedule it.
+
+**v3 pipeline (assets → orchestrator → assessments):**
+
+| Task                          | Cron (local time)            | Schedule note                              |
+|-------------------------------|------------------------------|--------------------------------------------|
+| `bulk_orchestrator_priority1` | `0 11 * * *` (daily 11:00 CEST) | Tier-2 sweep over `fda_assets.watch_priority=1`. 50/day cap shared with priority2. |
+| `bulk_orchestrator_priority2` | `0 11 * * 1` (Mon 11:00 CEST)  | Same skill, `watch_priority=2`. Collides with priority1 on Mondays — the 50/day cap is shared. |
+| `fact_extractor_opus`         | `15 * * * *` (hourly :15)     | Opus-driven fact extraction from material `asset_documents` → `extracted_facts`. **200/day cap (raised from 50 on 2026-05-23).** |
+| `asset_linker_backfill`       | `0,30 * * * *` (every 30 min) | Opus-driven classifier; replaces the disabled Modal Sonnet `v3-asset-linker-pass1` pg_cron. Yield-first ordering. |
+| `fda_aging_review`            | `30 8 * * *` (08:30 CEST daily) | 06:30 UTC. Stage B Claude review on `aging_state='kill_pending'`. Dual gate. 10/UTC-day server-side cap. |
+| `fda_challenger_replay`       | `0 11 * * 0` (Sun 11:00 CEST)  | 09:00 UTC, parallel slot to v2 `challenger_retro` (different write target — `accuracy_metrics` with auditor='challenger_retro', different rows). |
+| `fda_medical_review`          | `0 */2 * * *` (every 2 h)     | Drains `fda_agent_reviews` WHERE agent_kind='medical'. 10/UTC-day cap (per-kind). |
+| `fda_regulatory_review`       | `0 */2 * * *` (every 2 h)     | Drains `fda_agent_reviews` WHERE agent_kind='regulatory'. 10/UTC-day cap. |
+| `fda_microstructure_review`   | `0 */2 * * *` (every 2 h)     | Drains `fda_agent_reviews` WHERE agent_kind='microstructure'. 10/UTC-day cap. |
+
+The three FDA review routines share a single `0 */2 * * *` cron; Cowork's dispatch jitter (a few minutes per task) keeps them from firing simultaneously. Per-kind quota is enforced at claim time, so head-of-line blocking between kinds is not possible.
+
+**Observability:**
+
+| Task            | Cron (local time)         | Schedule note                                    |
+|-----------------|---------------------------|--------------------------------------------------|
+| `skill_watchdog`| `0 */2 * * *` (every 2 h) | Detects recurring skills gone dark via DB side-effect SLA; raises/resolves `operator_flags`. Read-only except `operator_flags`. |
+
+If any routine fails to fire on the runner (Cowork hang, mid-run abort, API ConnectionRefused), `skill_watchdog` will raise a `skill_dark:<name>` flag within its SLA window (4–8 hours depending on the routine). Watch the `operator_flags` dashboard for these — they are the canonical "JGoror's runner went dark" signal.
 
 ### Pull cadence
 
@@ -174,9 +195,10 @@ Pedro edits on Mac → commits + pushes from `conan-cowork-skills` → JGoror's 
 
 ### Skip on the runner
 
-- v3 FDA orchestrator plugin install — the Tier-1 orchestrator runs on Modal, not Cowork. Tier-2 (`bulk_orchestrator_run`) is currently Mac-only.
-- Modal CLI auth — runner doesn't deploy or invoke Modal.
-- Anthropic SDK direct calls — all v2 skills go through Cowork session credentials.
+- **v3 FDA orchestrator plugin install** — the Tier-1 orchestrator runs on Modal, not Cowork. The runner does NOT need the plugin's sub-agent skills (`literature_reviewer`, `regulatory_history`, `competitive_landscape`); those are invoked by Tier-1 Modal-side. The runner only needs the wrappers in `conan-cowork-skills/wrappers/` and the skills they reference in `conan-cowork-skills/skills/` — both already covered by the symlink + clone in §3 above.
+- **Modal CLI auth** — runner doesn't deploy or invoke Modal.
+- **Anthropic SDK direct calls** — all skills go through Cowork session credentials (Pedro's seat).
+- **Skills authoring** — the runner is read-only by convention. Don't edit `skills/` or `wrappers/` from Windows; the next `git pull --ff-only` on the Mac will conflict.
 
 ---
 
@@ -219,42 +241,58 @@ Run from the Mac with the Supabase MCP wired up (read-only smoke tests are safe;
 
 ```sql
 -- Find an existing needs_scoring row first; do not invent fake signal IDs.
+-- v2-teardown A.3 narrowed the scope to FDA profiles only; the reactor hard-blocks
+-- non-FDA signals upstream, but defend in case any pre-halt rows are still queued.
 SELECT signal_id, scoring_profile, score
 FROM signals
 WHERE score IS NULL
-  AND scoring_profile IN ('activist_governance', 'merger_arb', 'litigation')
+  AND scoring_profile IN ('binary_catalyst', 'fda_event')
 ORDER BY created_at DESC
 LIMIT 5;
 ```
 
-Then trigger the Cowork phrase "drain signal_resolver queue" on the runner and re-query — `score` should populate within ~10 min.
+Open the `signal_resolver` task in Cowork → Scheduled Tasks → Run now. Re-query — `score` should populate within ~2 min (the routine runs `0 */2 * * *` so manual fire is the fastest validation path). Verify the `band_with_bonus` column on `signals` and the matching `thesis_jobs` row transitioned out of `needs_scoring`.
 
 ### 5.2 `thesis_writer`
 
 ```sql
 -- Find a queued thesis_jobs row that's already enqueued by the reactor:
-SELECT signal_id, status, created_at
+SELECT signal_id, status, created_at, gate_reasons
 FROM thesis_jobs
 WHERE status = 'queued'
 ORDER BY created_at DESC
 LIMIT 5;
 ```
 
-Trigger Cowork phrase "drain queued theses". Within an hour expect `status='promoted'` and a matching row in `candidates` with `state='watch'`. DLQ to check on failure: `thesis_drafting_failures` (filter by `signal_id`).
+Manually fire the `thesis_writer` Cowork task ("Run now"). Within ~6 h on the schedule (or seconds on manual fire) expect `status` ∈ {`promoted`, `dlq`} and a matching row in `candidates`. Note the three branches:
+
+- **Clean promote** — `state='active'` (catalyst <60d) or `state='watch'`, `extensions` empty.
+- **Flagged-pass (§6.5 honest-decline or §4.5 prefilter)** — `state='watch'`, `extensions.routine_declined=true`, `gate_reasons` contains `'routine_declined_flagged'`. Job closes `status='promoted'` but does NOT consume the daily-15 quota.
+- **True DLQ** — `status='dlq'`, row in `thesis_drafting_failures` with `final_reasons` ∈ {`['syntactic_fail', ...]`, `['challenger_kill', ...]`, `['challenger_challenge_exhausted', ...]`}. Declines no longer land here.
+
+If `internal_config.discipline_gate_enabled='true'`, also expect `all_drafts[i].discipline_verdict` on every attempt; in shadow mode the verdict is written with `shadow:true` but routing is unchanged.
 
 ### 5.3 `candidate_aging`
 
 ```sql
--- Pick a watch-state candidate that hasn't been evaluated today:
-SELECT candidate_id, state, last_aging_evaluated_at
+-- Pick a watch-state candidate that hasn't been evaluated today (FDA-only):
+SELECT id, state, scoring_profile, last_aging_evaluated_at, extensions->>'routine_declined' AS flagged
 FROM candidates
 WHERE state IN ('watch', 'active')
+  AND scoring_profile IN ('binary_catalyst', 'fda_event')
   AND (last_aging_evaluated_at IS NULL OR last_aging_evaluated_at::date < CURRENT_DATE)
 ORDER BY last_aging_evaluated_at NULLS FIRST
 LIMIT 5;
 ```
 
-Trigger Cowork phrase "run candidate aging sweep". Expect `last_aging_evaluated_at = now()` and (if any kill_condition matched) a fresh `candidate_events` row with `event_type='state_changed'`.
+Manually fire the `candidate_aging` Cowork task. Expect:
+
+- `last_aging_evaluated_at = now()` on every row touched (Stage A + Stage B both stamp).
+- Stage A may have transitioned `watch → active` (catalyst <60d AND `routine_declined IS DISTINCT FROM 'true'`), aged-out watch → killed, stale active → watch, or fired the deterministic 7d catalyst-elapsed demote.
+- Stage B writes `candidate_events(event_type='state_changed'|'scored', payload.stage='B')` and on kill/deliver an `outcomes` row with `outcome_label` set inline (so `challenger_retro` has labeled samples).
+- Triggered claims (kill OR deliver) must survive BOTH the challenger semantic gate AND the `rpc_regex_check` integrity check; failures downgrade to pending and increment `candidate_aging_failures.consecutive_failures` (≥3 ⇒ `operator_flags(kind='aging_stuck')`).
+
+If the routine exits silently with no log line, check `operator_flags` for `kind='bootstrap_failure'` — the bootstrap preflight raises that flag and stops rather than continuing without `$CONAN_ROOT` resolved.
 
 ### 5.4 v3 reactor + orchestrator-runs enqueue
 
@@ -322,7 +360,9 @@ LIMIT 5;
 
 ## 7. Sync cadence (recap)
 
-- Pedro edits on Mac (in `conan-cowork-skills/skills/` or `Conan/.claude/skills/` — same files).
+- Pedro edits on Mac (in `conan-cowork-skills/skills/` and `conan-cowork-skills/wrappers/` — both canonical here; `Conan/.claude/skills/` is a symlink to the skills dir).
+- When a skill structurally changes, **both** the skill file AND its `wrappers/<name>.md` need updating; the wrapper carries the cadence + guardrail summary that gets pasted into the Cowork scheduled task. See `wrappers/README.md`.
 - Pedro commits + pushes from `conan-cowork-skills` directly.
-- JGoror's pre-task `git pull --ff-only` picks up changes before each window.
+- JGoror's pre-task `git pull --ff-only` picks up changes before each window. Cowork re-reads the scheduled-task prompt on every fire, but the *prompt itself* is the registered text in Cowork's UI — git only updates the on-disk `wrappers/<name>.md` source-of-truth, NOT the registered prompt. **When a wrapper changes, the operator must re-paste its content into the Cowork scheduled-task prompt on the runner** (or use `mcp__scheduled-tasks__update_scheduled_task` from a Mac Cowork session).
 - **Never edit from the runner.** It's read-only by convention; treating it as a write surface drifts the canonical repo.
+- **Routine mirror discipline:** every routine is registered on BOTH machines. JGoror is the live writer (cron enabled); Pedro's copies are paused or manual-only to avoid dual-write contention on the shared `15/UTC-day` promotion cap (thesis_writer + signal_resolver) and the `50/UTC-day` bulk_orchestrator cap. If JGoror goes dark (skill_watchdog raises `skill_dark:*`), Pedro can re-enable his copies as a temporary failover — one Cowork UI toggle each.
