@@ -118,17 +118,31 @@ whole watchdog exists to catch.
 
 ### signal_resolver — canonical every 2 h (off-machine)
 
+`public.signals` has no `status` column on this project — it is keyed on
+`score`/`band_with_bonus` NULL-ness. Several signal types are intentionally
+NULL-scored on `public.signals` and carry their real score on
+`fda_event_features` (the `UNSCORED_PROFILES` contract — see
+`fda_signals_unscored_by_design`). Exclude those from the staleness probe
+or it over-fires on healthy by-design rows.
+
 ```sql
 SELECT count(*) AS stale
 FROM public.signals
-WHERE status IN ('needs_scoring','scoring')
+WHERE score IS NULL
+  AND signal_type NOT IN (
+    'fda_event','pdufa','eop2','phase3_readout','date_change'
+  )
   AND created_at < now() - interval '6 hours';
 ```
-DARK if `stale > 0`. Severity is **warn** at `stale ∈ [1,10]`; escalate to
-**critical** at `stale > 10` — that depth means the every-2h cron has
-missed ≥3 fires and the immediate-band funnel is now backed up beyond
-single-cycle recovery. signal_resolver is a P0 routine (every immediate-band
-signal flows through this skill; no other writer scores them).
+DARK if `stale > 0`. Keep the exclusion list in sync with the canonical
+`UNSCORED_PROFILES` set; new binary_catalyst types added there must be
+added here too.
+
+Severity is **warn** at `stale ∈ [1,10]`; escalate to **critical** at
+`stale > 10` — that depth means the every-2h cron has missed ≥3 fires
+and the immediate-band funnel is now backed up beyond single-cycle
+recovery. signal_resolver is a P0 routine (every immediate-band signal
+flows through this skill; no other writer scores them).
 
 ## Raise / resolve
 
