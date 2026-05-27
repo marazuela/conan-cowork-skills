@@ -135,7 +135,7 @@
       "additionalProperties": false,
       "required": ["headline", "n_known_competitors", "differentiation_assessment"],
       "properties": {
-        "headline": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "headline": { "type": "string", "minLength": 1, "maxLength": 5000 },
         "n_known_competitors": { "type": "integer", "minimum": 0 },
         "differentiation_assessment": {
           "type": "string",
