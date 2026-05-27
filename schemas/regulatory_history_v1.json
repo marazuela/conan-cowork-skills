@@ -11,6 +11,7 @@
     "class_membership",
     "class_precedents",
     "base_rates",
+    "sparse_class_warning",
     "sponsor_track_record",
     "reviewer_panel_concerns",
     "divergence_from_norm_flags",
@@ -92,6 +93,19 @@
         "adcomm_convene_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "boxed_warning_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "median_nda_to_decision_days": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+
+    "sparse_class_warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fires", "n_precedents", "threshold"],
+      "description": "Always emitted. fires=true when base_rates.n < threshold; downstream Stage 5 synthesis MUST widen base-rate CI rather than treat the point estimate as load-bearing.",
+      "properties": {
+        "fires": { "type": "boolean" },
+        "n_precedents": { "type": "integer", "minimum": 0 },
+        "threshold": { "type": "integer", "minimum": 1, "default": 5 },
+        "rationale": { "type": ["string", "null"] }
       }
     },
 
