@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/commercial_opportunity_v1.json",
+  "title": "Commercial Opportunity Sub-Agent Output (v1)",
+  "description": "Structured output from the commercial_opportunity sub-agent. Captures TAM (typically inferred), mcap-vs-opportunity ratio, standard-of-care drugs for the indication + their limitations + side-effect profile, unmet medical need severity (1-5), the asset's regulatory incentives, and a brief competitive-landscape headline. Hard-validated before return; failure routes to failed_reactor_events with source='sub_agent.commercial_opportunity'. Phase 2b of the v4 architecture simplification (~/.claude/plans/proud-booping-seal.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "asset_id",
+    "indication",
+    "tam_estimate",
+    "mcap_to_peak_revenue_ratio",
+    "standard_of_care",
+    "soc_limitations",
+    "soc_side_effects",
+    "unmet_need_severity_1_5",
+    "regulatory_incentives",
+    "competitive_landscape_summary",
+    "sourcing_completeness_pct",
+    "retrieved_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "asset_id": { "type": "string", "format": "uuid" },
+    "indication": { "type": "string", "minLength": 1 },
+
+    "tam_estimate": {
+      "type": "object",
+      "description": "Estimated total addressable market in USD. is_inferred MUST be true when TAM is not grounded in a primary market-research source (typical case — mark conservatively).",
+      "additionalProperties": false,
+      "required": ["low_usd", "high_usd", "is_inferred", "rationale"],
+      "properties": {
+        "low_usd": { "type": ["number", "null"], "minimum": 0 },
+        "high_usd": { "type": ["number", "null"], "minimum": 0 },
+        "is_inferred": { "type": "boolean" },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 800 }
+      }
+    },
+
+    "mcap_to_peak_revenue_ratio": {
+      "type": ["object", "null"],
+      "description": "Ratio of current company market cap to estimated peak annual revenue at full uptake. Null when sponsor mcap is unknown or peak-revenue cannot be sized.",
+      "additionalProperties": false,
+      "required": ["value", "rationale"],
+      "properties": {
+        "value": { "type": ["number", "null"], "minimum": 0 },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+
+    "standard_of_care": {
+      "type": "array",
+      "description": "Drugs currently approved + commonly used for the indication. Empty array allowed only when truly no SoC exists.",
+      "minItems": 0,
+      "maxItems": 15,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "drug_class", "line_of_therapy"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "drug_class": { "type": "string" },
+          "line_of_therapy": {
+            "type": "string",
+            "enum": ["1L", "2L", "3L+", "maintenance", "neoadjuvant", "adjuvant", "any", "unknown"]
+          },
+          "approval_year": { "type": ["integer", "null"], "minimum": 1900, "maximum": 2099 },
+          "primary_source_url": { "type": ["string", "null"], "format": "uri" }
+        }
+      }
+    },
+
+    "soc_limitations": {
+      "type": "array",
+      "description": "Where current therapies fall short: efficacy ceiling, durability, contraindications, dosing burden, response rates.",
+      "minItems": 0,
+      "maxItems": 10,
+      "items": { "type": "string", "minLength": 5, "maxLength": 500 }
+    },
+
+    "soc_side_effects": {
+      "type": "array",
+      "description": "Treatment-emergent adverse events of the current standard of care. Sourced from openFDA label adverse_reactions where possible.",
+      "minItems": 0,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["effect", "severity", "frequency_band"],
+        "properties": {
+          "effect": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "severity": {
+            "type": "string",
+            "enum": ["mild", "moderate", "severe", "life_threatening"]
+          },
+          "frequency_band": {
+            "type": "string",
+            "enum": ["common_ge_10pct", "common_1_to_10pct", "uncommon_lt_1pct", "rare", "unknown"]
+          },
+          "source_drug_name": { "type": ["string", "null"] }
+        }
+      }
+    },
+
+    "unmet_need_severity_1_5": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "5 = no adequate therapy exists / mortality-driving unmet need; 4 = poor existing options with major side-effect burden; 3 = adequate options exist but improvement clearly valuable; 2 = mild incremental need; 1 = crowded category with strong existing options."
+    },
+
+    "regulatory_incentives": {
+      "type": "array",
+      "description": "FDA designations the asset has received or is likely eligible for. Always include at least one entry — use ['none'] when no designations apply.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "breakthrough",
+          "fast_track",
+          "orphan_drug",
+          "priority_review",
+          "accelerated_approval",
+          "rmat",
+          "none"
+        ]
+      }
+    },
+
+    "competitive_landscape_summary": {
+      "type": "object",
+      "description": "One-paragraph headline + structured differentiation read. Detailed competitor enumeration is the `competitive` sub-agent's responsibility; this is the commercial-context summary.",
+      "additionalProperties": false,
+      "required": ["headline", "n_known_competitors", "differentiation_assessment"],
+      "properties": {
+        "headline": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "n_known_competitors": { "type": "integer", "minimum": 0 },
+        "differentiation_assessment": {
+          "type": "string",
+          "enum": [
+            "first-in-class",
+            "best-in-class-likely",
+            "competitive",
+            "me-too",
+            "behind",
+            "unknown"
+          ]
+        }
+      }
+    },
+
+    "sourcing_completeness_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Self-reported coverage of the schema fields backed by retrieved evidence (not inferred). Drives evidence_quality at Stage 1."
+    },
+
+    "retrieved_at": { "type": "string", "format": "date-time" }
+  }
+}
