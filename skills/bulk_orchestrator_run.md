@@ -68,20 +68,17 @@ If zero rows: emit `{processed: 0, reason: 'no priority-N assets due'}` and stop
 
 ### 3. Enqueue + fetch input blobs
 
-For the selected asset_ids, call the Modal endpoint via the existing RPC bridge pattern (D-122 split-call: `_conan_modal_post_enqueue` + `rpc_compute_collect`):
+For the selected asset_ids, call the SQL wrapper `rpc_tier2_bulk_enqueue` — a `SECURITY DEFINER` thin shim that POSTs `{action: 'tier2_bulk_enqueue', args: {asset_ids: [...]}}` to the multiplexed `modal_url_compute_v3` endpoint and returns the pg_net `request_id`. Pair with `rpc_compute_collect` (D-122 split-call pattern):
 
 ```sql
 -- Enqueue (separate execute_sql, single statement; pg_net needs the txn to commit)
-SELECT public._conan_modal_post_enqueue(
-  'tier2_bulk_enqueue',
-  jsonb_build_object('asset_ids', $json$["<id1>","<id2>",...]$json$::jsonb)
-) AS request_id;
+SELECT public.rpc_tier2_bulk_enqueue(ARRAY['<id1>','<id2>',...]::text[]) AS request_id;
 
 -- Collect (separate execute_sql)
 SELECT public.rpc_compute_collect($1, 60000) AS result;  -- 60s; blob assembly is N×(asset+facts+docs+prior) reads
 ```
 
-If the `modal_url_tier2_bulk_enqueue` config row is missing (typical when the FastAPI endpoint hasn't been wired yet — see "Known dependencies" below), fall back to the **direct-insert path**:
+If `modal_url_compute_v3` itself is missing (would require a Modal redeploy regression — none observed since 2026-04-23) the wrapper raises with a precise message identifying the absent config key. On that error, fall back to the **direct-insert path**:
 
 ```sql
 INSERT INTO public.orchestrator_runs (asset_id, trigger_type, tier, status, notes)
@@ -134,31 +131,25 @@ Process serially (NOT in parallel — Sonnet rate limits and Cowork's single-con
 2. The inner skill returns a `convergence_assessment_v1.json` payload with `tier=2, orchestrator_version='bulk_v0'`.
 3. Capture wall-clock latency (start→end of step 1) and accumulated cost (Sonnet input/output token cost; the inner skill emits these).
 
-**On Sonnet error / inner-skill exception** (timeout, refusal, infrastructure failure): call `tier2_fail` and skip to the next asset:
+**On Sonnet error / inner-skill exception** (timeout, refusal, infrastructure failure): call `rpc_tier2_fail` and skip to the next asset:
 
 ```sql
-SELECT public._conan_modal_post_enqueue(
-  'tier2_fail',
-  jsonb_build_object('run_id', $run_id, 'error_message', $error)
-) AS request_id;
+SELECT public.rpc_tier2_fail($run_id::uuid, $error::text) AS request_id;
 SELECT public.rpc_compute_collect($1, 15000);
 ```
 
-(Fall back to a direct UPDATE on `orchestrator_runs` if the bridge is unavailable; mirror `orchestrator_runtime.tier2.fail_tier2_run` — INCLUDE `tier=2` in the WHERE so a Tier-1 row can never be accidentally marked failed.)
+(Fall back to a direct UPDATE on `orchestrator_runs` if `modal_url_compute_v3` is unreachable; mirror `orchestrator_runtime.tier2.fail_tier2_run` — INCLUDE `tier=2` in the WHERE so a Tier-1 row can never be accidentally marked failed.)
 
 **On inner-skill success**: continue to step 6.
 
 ### 6. Post the completed payload
 
 ```sql
-SELECT public._conan_modal_post_enqueue(
-  'tier2_complete',
-  jsonb_build_object(
-    'run_id',     $run_id,
-    'payload',    $payload::jsonb,
-    'cost_usd',   $cost_usd::numeric,
-    'latency_ms', $latency_ms::int
-  )
+SELECT public.rpc_tier2_complete(
+  run_id     => $run_id::uuid,
+  payload    => $payload::jsonb,
+  cost_usd   => $cost_usd::numeric,
+  latency_ms => $latency_ms::int
 ) AS request_id;
 SELECT public.rpc_compute_collect($1, 60000);  -- includes prior fetch + persist + escalation enqueue
 ```
@@ -200,20 +191,15 @@ After the per-asset loop, emit the sweep summary. No per-asset stamp column need
 
 The summary is what Cowork reports back to the operator dashboard; structure it identically across runs so dashboards can rely on the field set.
 
-## Known dependencies (what's NOT yet wired — tag for Pedro before scheduling)
+## Known dependencies
 
-This skill assumes three Modal endpoints + their RPC bridges exist:
+Path 2 from the original plan shipped (single multiplexed `compute` FastAPI endpoint). The skill's primary RPC path uses these wrappers:
 
-- `tier2_bulk_enqueue` Modal function ✅ (shipped 2026-05-08, plain @app.function — NOT yet exposed as `@modal.fastapi_endpoint` due to the 8-endpoint Modal-free-tier cap on `conan-v3-orchestrator`)
-- `tier2_complete` Modal function ✅ (same)
-- `tier2_fail` Modal function ✅ (same)
+- `public.rpc_tier2_bulk_enqueue(asset_ids text[]) → bigint` — POSTs `{action: 'tier2_bulk_enqueue', args: {asset_ids}}` to `modal_url_compute_v3`.
+- `public.rpc_tier2_complete(run_id, payload, cost_usd, latency_ms) → bigint` — same multiplex, `action='tier2_complete'`.
+- `public.rpc_tier2_fail(run_id, error_message) → bigint` — same multiplex, `action='tier2_fail'`.
 
-The corresponding `internal_config.modal_url_*` rows + SQL `rpc_*` thin wrappers (matching the `rpc_assess_thesis` / `rpc_rescore_with_dims` pattern from `20260429020000_compute_rpcs_split_call.sql`) are PENDING. Two paths to unblock:
-
-1. **Free up two FastAPI endpoint slots** on conan-v3-orchestrator (or upgrade the Modal plan), then add `@modal.fastapi_endpoint(method="POST", label="tier2-...")` decorators to the three functions and seed `internal_config` with the resulting URLs.
-2. **OR ship a single multiplex `compute` FastAPI endpoint** that takes `{action, args}` and dispatches internally. One endpoint slot, three logical operations. The `_conan_modal_post_enqueue('tier2_complete', body)` SQL wrapper would translate to one HTTP POST with `{action: 'tier2_complete', ...}`.
-
-Until either lands, the **direct-insert path** in step 3 + the inline mirror of `tier2.fail_tier2_run` in step 5 keep this skill operable without Modal — Cowork can persist via Supabase MCP directly, at the cost of duplicating the Python validator/persister/escalation logic on the Cowork side. That duplication is acceptable for a bring-up window, but is the explicit tech debt to retire as part of the Modal-bridge follow-up. A drift-detection test (parallel-run a Cowork direct-insert path against a Modal-bridge path on the same fixture) goes in the same follow-up PR.
+All three are `SECURITY DEFINER` SQL shims defined alongside the Modal `compute_v3` endpoint; they share the `modal_url_compute_v3` config key (no per-action URL rows in `internal_config`). The direct-insert fallback in §3 + the inline-mirror UPDATE in §5 remain as belt-and-suspenders if the Modal multiplex goes down.
 
 ## Reference
 
