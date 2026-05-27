@@ -25,34 +25,44 @@ This skill mirrors v2 `candidate_aging.md` §5 Stage B in v3 shape. The 15/UTC-d
 
 ### 1. Pull the work queue
 
-Call the Modal `compute_v3` endpoint via the existing RPC bridge:
+The originally-planned Modal `aging_bulk_enqueue` endpoint was never shipped (the `compute_v3` multiplex on the conan-v3-orchestrator app does not register that `action`; calls return HTTP 400 `unknown action 'aging_bulk_enqueue'` — see the 2026-05-25 `aging_review_dispatch_gap` operator_flag). Until/unless someone wires it, the skill drives the queue directly via Supabase MCP — two reads, no Modal hop.
 
 ```sql
--- Enqueue
-SELECT public._conan_modal_post_enqueue(
-  'aging_bulk_enqueue',
-  jsonb_build_object('max_assets', 10)
-) AS request_id;
-
--- Collect (separate execute_sql; pg_net requires the txn to commit)
-SELECT public.rpc_compute_collect(<request_id>) AS payload;
+-- 1a. Today's Stage B count (the quota counter).
+SELECT count(*) AS today_count
+  FROM public.fda_aging_verdicts
+ WHERE stage = 'b_claude_review'
+   AND created_at >= (now() AT TIME ZONE 'UTC')::date;
 ```
 
-`payload` shape:
+If `today_count >= 10`: emit `{processed: 0, reason: 'daily quota reached'}` and stop.
+
+```sql
+-- 1b. The kill_pending work set, capped to remaining_quota.
+-- Stage A's v3_fda_aging_stage_a() is the only writer of aging_state='kill_pending'
+-- (see migration 20260524000040). Asset must still be active and not already
+-- evaluated by Stage B today.
+SELECT fa.id, fa.ticker, fa.drug_name, fa.indication,
+       fa.watch_priority, fa.aging_state, fa.next_catalyst_date,
+       fa.aging_extensions, fa.last_aging_evaluated_at, fa.entity_id
+  FROM public.fda_assets fa
+ WHERE fa.is_active = true
+   AND fa.aging_state = 'kill_pending'
+   AND (fa.last_aging_evaluated_at IS NULL
+        OR fa.last_aging_evaluated_at < (now() AT TIME ZONE 'UTC')::date)
+ ORDER BY fa.watch_priority ASC, fa.aging_state_since ASC
+ LIMIT $1;  -- bound = min(max_assets_arg, 10 - today_count); never > 10
+```
+
+If zero rows: emit `{processed: 0, reason: 'no kill_pending assets due'}` and stop. The quota may already be exhausted (caught by 1a) — that's expected on heavy days.
+
+**When the Modal `aging_bulk_enqueue` action does ship**, swap 1a/1b for the single `rpc_aging_bulk_enqueue` wrapper (following the `rpc_tier2_bulk_enqueue` pattern: SECURITY DEFINER SQL shim → `_conan_modal_post_enqueue('compute_v3', {action: 'aging_bulk_enqueue', args})`). The response shape is preserved below for forward-compat:
+
 ```json
-{
-  "assets": [
-    { "id": "<uuid>", "ticker": "AXSM", "drug_name": "AXS-05",
-      "indication": "Major Depressive Disorder", "watch_priority": 1,
-      "aging_state": "kill_pending", "next_catalyst_date": "2026-05-08",
-      "aging_extensions": {}, "last_aging_evaluated_at": null }
-  ],
+{ "assets": [ { "id": "<uuid>", "ticker": "AXSM", ... } ],
   "remaining_quota": 8,
-  "today_count": 2
-}
+  "today_count": 2 }
 ```
-
-If `assets` is empty: emit `{processed: 0, reason: 'no kill_pending assets due'}` and stop. The quota may already be exhausted — that's expected on heavy days.
 
 ### 2. For each asset, load the per-asset bundle
 
@@ -268,27 +278,63 @@ UPDATE public.fda_assets
 
 ### 6. consecutive_failures check
 
-After step 5, if the new verdict row has `consecutive_failures >= 3`:
+After step 5, if the new verdict row has `consecutive_failures >= 3`, raise (or refresh) an open `aging_stuck` flag. The `operator_flags` table has no per-asset typed FK — there's no `target_type`/`target_id`/`payload` column triple. Real columns are `severity`/`source`/`kind` (all NOT NULL), the four optional FKs `scanner_id`/`entity_id`/`signal_id`/`candidate_id`, `title` (NOT NULL), `body` (text, nullable), and `evidence` (jsonb, NOT NULL, default `'{}'`). Per-asset dedupe rides on `entity_id` (which we have in scope from §1's `fda_assets.entity_id`) because the live partial unique index is `(source, kind, COALESCE((scanner_id)::text, ''), COALESCE((entity_id)::text, ''), COALESCE(signal_id, ''), COALESCE((candidate_id)::text, '')) WHERE resolved_at IS NULL`.
+
+ON CONFLICT against a COALESCE-expression partial index is fragile, so dedupe explicitly:
 
 ```sql
-INSERT INTO public.operator_flags
-  (source, kind, severity, target_type, target_id, payload, created_at)
-VALUES (
-  'aging_review', 'aging_stuck', 'warn', 'fda_asset', $asset_id,
-  jsonb_build_object(
-    'consecutive_failures', $count,
-    'latest_verdict_id', $verdict_id,
-    'note', 'asset has failed Stage B 3+ times in a row; investigate '
-            'kill_condition wording or fact extractor coverage'
-  ),
-  now()
-)
-ON CONFLICT (source, kind, target_type, target_id) DO UPDATE SET
-  payload  = EXCLUDED.payload,
-  severity = EXCLUDED.severity;
+-- 6a. Look for an existing open flag for this asset.
+SELECT id FROM public.operator_flags
+ WHERE source = 'aging_review'
+   AND kind   = 'aging_stuck'
+   AND entity_id IS NOT DISTINCT FROM $entity_id
+   AND resolved_at IS NULL
+ LIMIT 1;
 ```
 
-`source='aging_review'` may need to be added to `operator_flags_source_check` — when planning landed, the canonical sources list (migration 20260510000010_v3_stream6_safety_and_cleanup.sql:196–210) did not include `aging_review`. Before the first run, push an additive CHECK extension that appends it; until then, surface failures via a stdout warning rather than a failed insert.
+If a row came back, refresh it; otherwise insert:
+
+```sql
+-- 6b-update (when 6a returned a row).
+UPDATE public.operator_flags
+   SET severity = 'warn',
+       title    = 'fda asset stuck in kill_pending: ' || $ticker
+                  || ' (consecutive_failures=' || $count::text || ')',
+       evidence = jsonb_build_object(
+         'asset_id',              $asset_id::text,
+         'ticker',                $ticker,
+         'consecutive_failures',  $count,
+         'latest_verdict_id',     $verdict_id::text,
+         'note',                  'asset has failed Stage B 3+ times in a row; '
+                                  'investigate kill_condition wording or '
+                                  'fact_extractor coverage'
+       ),
+       updated_at = now()
+ WHERE id = $existing_flag_id;
+
+-- 6b-insert (when 6a returned no row).
+INSERT INTO public.operator_flags
+  (severity, source, kind, entity_id, title, body, evidence)
+VALUES (
+  'warn', 'aging_review', 'aging_stuck', $entity_id,
+  'fda asset stuck in kill_pending: ' || $ticker
+    || ' (consecutive_failures=' || $count::text || ')',
+  null,
+  jsonb_build_object(
+    'asset_id',              $asset_id::text,
+    'ticker',                $ticker,
+    'consecutive_failures',  $count,
+    'latest_verdict_id',     $verdict_id::text,
+    'note',                  'asset has failed Stage B 3+ times in a row; '
+                             'investigate kill_condition wording or '
+                             'fact_extractor coverage'
+  )
+);
+```
+
+The `IS NOT DISTINCT FROM` predicate handles the rare case where `fda_assets.entity_id` is NULL — the open-flag uniqueness still dedupes because the partial index COALESCEs nulls to `''`.
+
+**`source='aging_review'` is already in `operator_flags_source_check`** (verified live 2026-05-26 — confirms the additive CHECK migration landed). The earlier "may need to be added" caveat in this skill is obsolete; remove that worry.
 
 ### 7. Run report
 
