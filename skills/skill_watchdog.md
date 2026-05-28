@@ -71,17 +71,6 @@ SELECT (SELECT max(extracted_at) FROM public.extracted_facts
 ```
 DARK if `work_pending` AND `last_fact < now() - interval '6 hours'`.
 
-### bulk_orchestrator_priority1 — daily ~09:00 UTC
-
-```sql
-SELECT count(*) AS runs_today
-FROM public.orchestrator_runs
-WHERE tier = 2 AND created_at >= date_trunc('day', now());
-```
-DARK if `now()::time > '11:00'::time` AND `runs_today = 0`. Severity is
-**critical** for this one — a missed daily P1 sweep is pipeline-dark on the
-Tier-2 write path.
-
 ### thesis_writer — cadence every 6 h
 
 ```sql
@@ -167,8 +156,6 @@ Severity guidance:
 - `critical` for:
   - `candidate_aging` with `bootstrap_failed > 0` (silent-abort failure
     mode this watchdog exists to catch).
-  - `bulk_orchestrator_priority1` missed-daily-sweep (Tier-2 write path
-    pipeline-dark).
   - `signal_resolver` with `stale > 10` (≥3 missed every-2h cron fires;
     immediate-band funnel backed up beyond single-cycle recovery).
   - `thesis_writer` with `stuck > 5` (≥2 missed every-6h cron fires;

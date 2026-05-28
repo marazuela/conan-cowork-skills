@@ -11,7 +11,6 @@ Guardrails:
 - Per-skill SLA enumeration (the skill defines the probes; the wrapper does not re-derive them):
   - `asset_linker_backfill` — every 30 min; DARK if work_pending AND last_link < now() - interval '4 hours'. Severity warn.
   - `fact_extractor_opus` — hourly; DARK if work_pending AND last_fact < now() - interval '6 hours'. Severity warn.
-  - `bulk_orchestrator_priority1` — daily ~09:00 UTC; DARK if now()::time > '11:00' AND runs_today = 0. Severity **critical** (Tier-2 write path goes dark).
   - `thesis_writer` — every 6 h; DARK if stuck > 0 (status IN queued/drafting AND coalesce(updated_at, created_at) < now() - interval '8 hours'). Severity warn at stuck ∈ [1,5]; **critical** at stuck > 5 (≥2 missed cron fires; immediate-band signals stranded outside their alerting SLA — thesis_writer is P0).
   - `candidate_aging` — daily; DARK if now()::time > '09:00' AND eligible > 0 AND events_today = 0. Escalate to **critical** if any unresolved `source='candidate_aging' AND kind='bootstrap_failure'` flag exists.
   - `signal_resolver` — every 2 h; DARK if stale > 0 (signals.score IS NULL older than 6 h, EXCLUDING UNSCORED_PROFILES `signal_type IN ('fda_event','pdufa','eop2','phase3_readout','date_change')` which are NULL-scored by design — keep this exclusion list in sync with the canonical `UNSCORED_PROFILES` set). `public.signals` has no `status` column. Severity warn at stale ∈ [1,10]; **critical** at stale > 10 (≥3 missed cron fires; immediate-band funnel backed up beyond single-cycle recovery — signal_resolver is P0).

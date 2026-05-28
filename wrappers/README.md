@@ -18,7 +18,6 @@ Each `.md` file in this directory is a paste-ready prompt for a Cowork scheduled
 
 | Wrapper | Cadence | Skill | Touches |
 |---|---|---|---|
-| `bulk_orchestrator_run.md` | daily 11:00 CEST (priority=1), weekly Mon 11:00 CEST (priority=2) | `bulk_orchestrator_run` | Tier-2 sweep of `fda_assets.watch_priority` — registered as two routines `bulk_orchestrator_priority1` / `priority2` |
 | `fact_extractor_opus.md` | hourly | `fact_extractor_opus` | structured fact extraction from material `asset_documents` → `extracted_facts` (200/day cap) |
 | `asset_linker_backfill.md` | every 30 min | `asset_linker_backfill` | classify `documents` → `asset_documents` links, yield-first ordering (300/day cap) |
 | `fda_aging_review.md` | daily 06:30 UTC | `fda_aging_review` | Stage B Claude review on `fda_assets.aging_state='kill_pending'` (10/UTC-day cap) |
