@@ -184,6 +184,11 @@
       "description": "Fraction of schema fields grounded in retrieved evidence vs prior-knowledge inference. Drives Stage 1 evidence_quality."
     },
 
+    "sourcing_completeness_rationale": {
+      "type": ["string", "null"],
+      "description": "Optional one-paragraph rationale for the sourcing_completeness_pct score; counts which fields were grounded vs inferred. Sonnet emits this by pattern-match with tam_estimate.rationale / unmet_need_rationale even when the prompt only asks for the number — accept it rather than DLQ the call."
+    },
+
     "retrieved_at": { "type": "string", "format": "date-time" },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "memory_writeback_path": { "type": ["string", "null"] },
