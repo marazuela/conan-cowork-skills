@@ -2,7 +2,7 @@
 name: fda_aging_review
 description: v3 port of v2 candidate_aging Stage B. Daily Cowork-resident sweep of FDA assets in `aging_state='kill_pending'` (catalyst elapsed 1–7 days, flagged by the deterministic SQL Stage A). For each asset, evaluate open kill_conditions and deliver_conditions from `hypothesis_enumeration` against recent `extracted_facts` via a dual gate (mechanical match → Claude semantic challenger) and write a verdict to `fda_aging_verdicts (stage='b_claude_review')`. Terminal verdicts (kill/deliver) flip `fda_assets.is_active` and supersede the latest assessment. Runs under Pedro's Cowork-scheduled account (zero marginal API spend); does NOT call Modal or Anthropic API directly.
 trigger: Recurring scheduled task — daily 06:00 UTC (post overnight Stage A SQL sweep, pre US cash open). Also on-demand "run fda aging review" or "run fda aging review <asset_id>" (latter bypasses the bulk-enqueue selection but still respects the quota).
-quota: 10 Stage B evaluations per UTC day. Quota counter is `count(*) from fda_aging_verdicts where stage='b_claude_review' and created_at >= today_utc`. Server-side `aging_bulk_enqueue` action also enforces the cap so a runaway client can't over-request. Stage A SQL rows do not count.
+quota: 10 Stage B evaluations per UTC day. Quota counter is `count(*) from fda_aging_verdicts where stage='b_claude_review' and created_at >= today_utc`. The work-queue SELECT in step 1 enforces the cap via `LIMIT (10 - today_count)` so a runaway client can't over-request. Stage A SQL rows do not count.
 host: pedro
 host_enrollment: Pedro's Cowork — single scheduled task `conan-fda-aging-review` (cron `0 8 * * *` = 08:00 CEST = 06:00 UTC). DST flip 2026-10-26: change to `0 7 * * *` to hold 06:00 UTC after CEST→CET. Cowork applies a small dispatch jitter; treat the cron as ±5 min.
 ---
@@ -16,26 +16,48 @@ This skill mirrors v2 `candidate_aging.md` §5 Stage B in v3 shape. The 15/UTC-d
 1. **Stage A is upstream truth.** This skill only evaluates assets where `fda_assets.aging_state='kill_pending'` AND `last_aging_evaluated_at < today_utc`. Stage A is the only writer that sets `kill_pending`. Do not re-classify Stage A's output; if an asset is `kill_pending` but Stage A's rule was wrong, file an `operator_flags` row and skip — do not silently override.
 2. **Dual gate is non-negotiable.** Every triggered claim (recommendation ∈ {kill, deliver}) passes BOTH (a) the mechanical match in Gate 1 and (b) the Claude challenger in Gate 2. Either fails → recommendation downgrades to `maintain` (or `flag_for_review` if Gate 1 had a fallback hit), AND the asset's `consecutive_failures` counter on the latest `fda_aging_verdicts` row increments by 1.
 3. **`fda_aging_verdicts` is the single sink.** Every asset you evaluate gets exactly one verdict row with `stage='b_claude_review'`. State changes on `fda_assets` (is_active, aging_state, aging_extensions) are derivative of the verdict — write the verdict first, then update the asset, in the same SQL transaction batch where possible.
-4. **Quota gate is enforced server-side too.** The `aging_bulk_enqueue` action caps the returned list at `min(max_assets, 10 - today_count)`. If you receive an empty list, stop — do not pull from a fallback selection.
+4. **Quota gate is enforced in the SQL pull.** The work-queue SELECT in step 1 caps `LIMIT` at `GREATEST(0, 10 - today_count)`. If you receive an empty list, stop — do not pull from a fallback selection.
 5. **`routine_declined` is sticky.** When BOTH `recommendation='kill'` AND `challenger_verdict='kill'`, set `fda_assets.aging_extensions.routine_declined='true'`. This blocks orchestrator dispatch for 24h via `v3_prior_failure_guard()`. The flag clears on the next passing Stage B verdict (recommendation ∈ {promote_to_active, deliver, maintain} with challenger_verdict ∈ {confirm, challenge}).
-6. **No Modal calls beyond `aging_bulk_enqueue`.** This is a Cowork-resident skill. Once you have the asset list + evidence, all Claude work happens in your local context. Do NOT spawn Tier-1 runs from here — escalations to API path are Tier-2's job, not aging's.
+6. **No Modal calls at all.** This is a Cowork-resident skill. The work-queue pull is a direct Supabase MCP `execute_sql` SELECT (no `_conan_modal_post_enqueue` bridge). Once you have the asset list + evidence, all Claude work happens in your local context. Do NOT spawn Tier-1 runs from here — escalations to API path are Tier-2's job, not aging's.
 7. **`consecutive_failures >= 3` fires an operator_flag.** If three consecutive Stage B evaluations on the same asset end in Gate-1 failure (no mechanical match) OR Gate-2 challenger=challenge, write `operator_flags (source='aging_review', kind='aging_stuck', severity='warn', target_id=asset_id)`. Reset the counter on the next clean run.
 
 ## Run — step by step
 
 ### 1. Pull the work queue
 
-Call the Modal `compute_v3` endpoint via the existing RPC bridge:
+Single Supabase MCP `execute_sql` call — no Modal bridge. Sister Modal actions (`tier2_bulk_enqueue` etc.) were deleted in v4 Phase 6b; `aging_bulk_enqueue` was never implemented and the Cowork skill now reads `fda_assets` directly:
 
-```sql
--- Enqueue
-SELECT public._conan_modal_post_enqueue(
-  'aging_bulk_enqueue',
-  jsonb_build_object('max_assets', 10)
-) AS request_id;
-
--- Collect (separate execute_sql; pg_net requires the txn to commit)
-SELECT public.rpc_compute_collect(<request_id>) AS payload;
+```
+mcp__supabase__execute_sql (project_id=xvwvwbnxdsjpnealarkh):
+WITH today_count AS (
+  SELECT count(*)::int AS n
+  FROM public.fda_aging_verdicts
+  WHERE stage = 'b_claude_review'
+    AND created_at >= (now() AT TIME ZONE 'UTC')::date
+),
+quota AS (
+  SELECT n AS today_count,
+         GREATEST(0, 10 - n) AS remaining_quota
+  FROM today_count
+),
+picked AS (
+  SELECT fa.id, fa.ticker, fa.drug_name, fa.indication,
+         fa.watch_priority, fa.aging_state, fa.next_catalyst_date,
+         fa.aging_extensions, fa.last_aging_evaluated_at
+  FROM public.fda_assets fa
+  WHERE fa.is_active = true
+    AND fa.aging_state = 'kill_pending'
+    AND fa.watch_priority IN (1, 2)
+    AND (fa.last_aging_evaluated_at IS NULL
+         OR fa.last_aging_evaluated_at < (now() AT TIME ZONE 'UTC')::date)
+  ORDER BY fa.next_catalyst_date ASC NULLS FIRST
+  LIMIT (SELECT remaining_quota FROM quota)
+)
+SELECT jsonb_build_object(
+  'assets', COALESCE((SELECT jsonb_agg(to_jsonb(picked.*)) FROM picked), '[]'::jsonb),
+  'remaining_quota', (SELECT remaining_quota FROM quota),
+  'today_count', (SELECT today_count FROM quota)
+) AS payload;
 ```
 
 `payload` shape:
@@ -52,7 +74,7 @@ SELECT public.rpc_compute_collect(<request_id>) AS payload;
 }
 ```
 
-If `assets` is empty: emit `{processed: 0, reason: 'no kill_pending assets due'}` and stop. The quota may already be exhausted — that's expected on heavy days.
+If `assets` is empty: emit `{processed: 0, reason: 'no kill_pending assets due'}` and stop. The quota may already be exhausted — that's expected on heavy days. The `LIMIT (SELECT remaining_quota FROM quota)` clause is load-bearing: when `today_count >= 10` the limit is zero and the query returns an empty array, mirroring the old server-side cap.
 
 ### 2. For each asset, load the per-asset bundle
 
@@ -313,7 +335,7 @@ The run report goes to stdout AND a markdown file at `tasks/fda_aging_review_run
 
 - **Asset has no open hypotheses**: write `recommendation='maintain'`, `trigger_rule='no_open_hypotheses'`, `challenger_verdict=NULL`. Do not invoke Claude — there's nothing to evaluate against. Asset stays at `kill_pending` for Stage A to re-flag tomorrow.
 - **All hypotheses have empty deliver_conditions**: the asset can only get killed via Stage B, never delivered. Note in the report. This is expected for pure-bear hypotheses but unusual for FDA assets (where approval = deliver). Flag if all open hypotheses on a non-bear asset have empty deliver_conditions — that's a Stage 2 prompt regression worth raising.
-- **Asset is already `is_active=false`**: the aging_bulk_enqueue server-side filter (`is_active=true`) should prevent this. If you see one anyway, skip + log a warning.
+- **Asset is already `is_active=false`**: the step 1 selection's `is_active=true` predicate should prevent this. If you see one anyway, skip + log a warning.
 - **Stage 2 prompt-extension lag**: assessments produced before the `deliver_conditions` migration (`20260524000010`) will have empty arrays. Treat them as "kill-only evaluable" until they're superseded by a fresh Tier-1 run. Don't manually add deliver_conditions to old rows.
 - **The `agent_kind='aging_review'` CHECK extension is not yet in place**: the migration `20260524000020` adds it. Before that lands, skip the extractor-gap insert in step 3 (just log it locally).
 
