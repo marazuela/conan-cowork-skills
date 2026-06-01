@@ -11,6 +11,7 @@
     "class_membership",
     "class_precedents",
     "base_rates",
+    "sparse_class_warning",
     "sponsor_track_record",
     "reviewer_panel_concerns",
     "divergence_from_norm_flags",
@@ -92,6 +93,33 @@
         "adcomm_convene_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "boxed_warning_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "median_nda_to_decision_days": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+
+    "sparse_class_warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fires", "n_precedents", "threshold"],
+      "properties": {
+        "fires": {
+          "type": "boolean",
+          "description": "True when base_rates.n < threshold — downstream Stage 5 synthesis must widen the base-rate CI rather than treat the point estimate as load-bearing."
+        },
+        "n_precedents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of class precedents the base rate was computed over (mirrors base_rates.n)."
+        },
+        "threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5,
+          "description": "Calibrated against the U3 compare-to-historical-precedents low-density convention — fewer than five enumerated precedents cannot anchor a base rate without flagging extrapolation risk."
+        },
+        "rationale": {
+          "type": ["string", "null"],
+          "description": "Short rationale when fires=true. Null when fires=false (operator verification path that the check ran)."
+        }
       }
     },
 
