@@ -110,7 +110,7 @@
     "summary": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 1500,
+      "maxLength": 3000,
       "description": "Operator-facing prose summary suitable for the IC panel header (D-111 §2). Renders inline on the dashboard."
     },
     "key_findings": {
