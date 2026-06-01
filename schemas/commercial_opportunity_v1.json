@@ -1,0 +1,196 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://conan/marazuela/schemas/commercial_opportunity_v1.json",
+  "title": "Commercial Opportunity Sub-Agent Output (v1)",
+  "description": "Structured output from the commercial_opportunity sub-agent runner (v4 Phase 2b). Captures the commercial half of the investment thesis: TAM, standard of care + its side-effect burden, unmet-need severity, regulatory incentives. Stage 1 weaves this into the cited prose alongside the regulatory thesis. Hard-validated before return; failure → failed_reactor_events with source='sub_agent.commercial_opportunity'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "asset_id",
+    "indication",
+    "tam_estimate",
+    "standard_of_care",
+    "soc_limitations",
+    "soc_side_effects",
+    "unmet_need_severity_1_5",
+    "regulatory_incentives",
+    "competitive_landscape_summary",
+    "sourcing_completeness_pct",
+    "retrieved_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "asset_id": { "type": "string", "format": "uuid" },
+    "indication": { "type": "string", "minLength": 1 },
+
+    "tam_estimate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low_usd", "high_usd", "is_inferred", "rationale"],
+      "properties": {
+        "low_usd": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Lower bound of total addressable market in USD (annual peak). Null only if no defensible estimate is possible."
+        },
+        "high_usd": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Upper bound of TAM in USD."
+        },
+        "is_inferred": {
+          "type": "boolean",
+          "description": "True whenever the range isn't backed by a primary market-research source — usually true. Honesty norm: prefer is_inferred=true over a wrong-precise number."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Patient-population × annual-cost × penetration reasoning, plus any primary sources cited."
+        },
+        "primary_source_url": {
+          "type": ["string", "null"],
+          "format": "uri",
+          "description": "Optional market-research URL backing the range. Null when is_inferred=true and no source was found."
+        }
+      }
+    },
+
+    "standard_of_care": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["drug", "primary_source_url"],
+        "properties": {
+          "drug": { "type": "string", "minLength": 1 },
+          "sponsor": { "type": ["string", "null"] },
+          "mechanism_of_action": { "type": ["string", "null"] },
+          "approval_year": {
+            "type": ["integer", "null"],
+            "minimum": 1950,
+            "maximum": 2100
+          },
+          "is_currently_marketed": {
+            "type": "boolean",
+            "description": "False for withdrawn drugs that still anchor the historical SoC narrative."
+          },
+          "primary_source_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "FDA label or openFDA approval record URL."
+          },
+          "fda_label_url": { "type": ["string", "null"], "format": "uri" }
+        }
+      }
+    },
+
+    "soc_limitations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Short strings describing where SoC falls short (efficacy ceiling, durability, contraindications, dosing burden, etc.). Each item is one limitation, not a paragraph."
+    },
+
+    "soc_side_effects": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["drug", "ae_term", "severity", "frequency_band"],
+        "properties": {
+          "drug": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Must match a `drug` value from standard_of_care[]."
+          },
+          "ae_term": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Adverse event term as it appears in the FDA label adverse_reactions section."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["mild", "moderate", "severe", "life_threatening", "unknown"]
+          },
+          "frequency_band": {
+            "type": "string",
+            "enum": ["very_common", "common", "uncommon", "rare", "very_rare", "unknown"],
+            "description": "Use 'unknown' rather than inventing percentages when the label is silent."
+          },
+          "drives_discontinuation": {
+            "type": ["boolean", "null"],
+            "description": "True when the AE is documented as a leading cause of treatment discontinuation."
+          }
+        }
+      }
+    },
+
+    "unmet_need_severity_1_5": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "5 = no adequate therapy / mortality-driving. 4 = poor options with major AE burden. 3 = adequate options but improvement clearly valuable. 2 = mild incremental. 1 = crowded category with strong options."
+    },
+
+    "unmet_need_rationale": {
+      "type": ["string", "null"],
+      "description": "Optional one-paragraph rationale for the severity score; grounds the integer."
+    },
+
+    "regulatory_incentives": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "enum": [
+          "none",
+          "breakthrough",
+          "fast_track",
+          "orphan_drug",
+          "priority_review",
+          "accelerated_approval",
+          "rmat",
+          "qualified_infectious_disease_product",
+          "pediatric_voucher_eligible"
+        ]
+      },
+      "description": "FDA designations the asset has OR is likely to receive. Use ['none'] when no designations apply — never empty. Inflated claims will reduce evidence_quality at Stage 1; the orchestrator cross-checks against extracted_facts.regulatory_designations."
+    },
+
+    "competitive_landscape_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 5000,
+      "description": "One concise paragraph (~2000 chars target, 5000 hard cap) summarising the competitive context + differentiation read. Detailed competitor enumeration is the competitive sub-agent's job; this is commercial context only."
+    },
+
+    "mcap_to_peak_revenue_ratio": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Sponsor market cap / peak-revenue estimate from TAM × realistic-penetration. Null when sponsor is private OR sizing is too speculative. v0 runner does not call polygon get_market_cap (see runner docstring); expect mostly null on v0."
+    },
+
+    "sourcing_completeness_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Fraction of schema fields grounded in retrieved evidence vs prior-knowledge inference. Drives Stage 1 evidence_quality."
+    },
+
+    "retrieved_at": { "type": "string", "format": "date-time" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "memory_writeback_path": { "type": ["string", "null"] },
+    "partial_output": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if budget was exhausted before completion."
+    }
+  }
+}
