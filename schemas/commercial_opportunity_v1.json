@@ -10,6 +10,7 @@
     "asset_id",
     "indication",
     "tam_estimate",
+    "mcap_to_peak_revenue_ratio",
     "standard_of_care",
     "soc_limitations",
     "soc_side_effects",
@@ -174,7 +175,7 @@
     "mcap_to_peak_revenue_ratio": {
       "type": ["number", "null"],
       "minimum": 0,
-      "description": "Sponsor market cap / peak-revenue estimate from TAM × realistic-penetration. Null when sponsor is private OR sizing is too speculative. v0 runner does not call polygon get_market_cap (see runner docstring); expect mostly null on v0."
+      "description": "Sponsor market cap / peak-revenue estimate from TAM × realistic-penetration. Required-but-nullable: the key must ALWAYS be present (the degraded payload and the Stage 9 commercial_dimensions contract both emit it), but use null when sponsor is private OR sizing is too speculative. v0 runner does not call polygon get_market_cap (see runner docstring); expect mostly null on v0."
     },
 
     "sourcing_completeness_pct": {
