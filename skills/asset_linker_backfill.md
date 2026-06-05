@@ -19,7 +19,7 @@ You are the **asset_linker pass-1** for the Conan v3 pipeline. The Modal worker 
 6. **link_type taxonomy is fixed.** Use only: `primary`, `mentions`, `pipeline_context`, `safety_signal`, `literature`. Definitions in step 5 — do not invent variants.
 7. **Honest empty.** If a doc mentions an asset only in boilerplate, market-table, or competitive landscape with no investor signal: emit `{"links": []}` and stamp `no_match`. The Modal worker's empty-rate problem came from over-eager linking — don't repeat it.
 8. **`extraction_method='cowork_backfill'`.** Always. Distinguishes Cowork-emitted rows from `'agent_pass1'` / `'agent_pass2'` (legacy Modal) and prevents pass-2 Haiku verification from re-running on them.
-9. **Yield-first claim order.** Both Modal `v3-asset-linker-pass1` (disabled 2026-05-13) AND `v3-asset-linker-pass2` (Haiku verifier — also removed from cron.job as of 2026-05-21) are gone. No concurrent writers exist. Claim docs in YIELD order so ticks don't burn on 2023 EDGAR noise (a 2026-05-20 manual drain found 0/25 hits oldest-first, then 35/52 hits yield-first):
+9. **Yield-first claim order.** Both Modal `v3-asset-linker-pass1` (disabled 2026-05-13) AND `v3-asset-linker-pass2` (Haiku verifier — also removed from cron.job as of 2026-05-21) are gone. No concurrent writers exist. **Never-classified docs (NULL marker) are claimed before stale-hash re-validation** (step 2 primary sort) — otherwise a churning asset_set_hash (it changes on every asset add) starves the genuine backlog with 0-link tier-1 re-claims. Within that, claim docs in YIELD order so ticks don't burn on 2023 EDGAR noise (a 2026-05-20 manual drain found 0/25 hits oldest-first, then 35/52 hits yield-first):
    - tier 1: `source IN ('conan_signal','press_release')` (~37% / ~82% hit rate)
    - tier 2: `source IN ('clinicaltrials','dailymed','openfda','fda_advisory')`
    - tier 3: everything else (EDGAR / federal_register / etc.), newest-first
@@ -61,6 +61,12 @@ WITH pending AS (
          OR d.linker_classified_asset_set_hash IS NULL
          OR d.linker_classified_asset_set_hash <> '<asset_set_hash from step 1>')
   ORDER BY
+    -- Never-classified docs FIRST, ahead of stale-hash re-validation: the step-1
+    -- asset_set_hash changes on every asset add, marking the ENTIRE classified corpus
+    -- stale, so without this key a run burns all 25 slots re-claiming already-linked
+    -- tier-1 docs (0 new links, all dedup-skipped) and never reaches the NULL-marker
+    -- backlog. Re-validation still happens, but only once the new-doc backlog drains.
+    CASE WHEN d.linker_classified_at IS NULL THEN 0 ELSE 1 END,
     CASE
       WHEN d.source IN ('conan_signal','press_release')                       THEN 1
       WHEN d.source IN ('clinicaltrials','dailymed','openfda','fda_advisory') THEN 2
